@@ -77,6 +77,12 @@ ln -s ${PWD}/carla/ external_paths/carla_root
 ```
 Note: we choose the setuptools==41 to install because this version has the feature `easy_install`. After installing the carla.egg you can install the lastest setuptools to avoid No module named distutils_hack.
 
+Fix random seed in CARLA: add the following contents in carla_root/CarlaUE4/Config/DefaultGameUserSettings.ini.
+```
+[CARLA/ServerRandomSeed]
+Seed = 1234
+```
+
 ### Step 3: Install Spconv (1.2.1)
 We use spconv 1.2.1 to generate voxel features in perception module.
 
