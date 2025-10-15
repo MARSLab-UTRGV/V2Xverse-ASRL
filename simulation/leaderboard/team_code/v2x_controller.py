@@ -3,6 +3,12 @@ from collections import deque
 from team_code.render_v2x import render, render_self_car
 
 class PIDController(object):
+    """
+    Basic proportional-integral-derivative controller with a sliding error window.
+
+    Sustains a finite history of errors to approximate the integral term and uses the
+    most recent pair of samples for the derivative estimate.
+    """
     def __init__(self, K_P=1.0, K_I=0.0, K_D=0.0, n=20):
         self._K_P = K_P
         self._K_I = K_I
@@ -13,6 +19,15 @@ class PIDController(object):
         self._min = 0.0
 
     def step(self, error):
+        """
+        Update the controller with the latest error and emit the control effort.
+
+        Args:
+            error (float): Target minus measurement for the current timestep.
+
+        Returns:
+            float: Combined PID response after clamping the history length.
+        """
         self._window.append(error)
         self._max = max(self._max, abs(error))
         self._min = -abs(self._max)
@@ -28,7 +43,14 @@ class PIDController(object):
 
 def downsample_waypoints(waypoints, precision=0.2):
     """
-    waypoints: [float lits], 10 * 2, m
+    Insert evenly spaced intermediate samples between waypoints if they are far apart.
+
+    Args:
+        waypoints (np.ndarray): Sequence of 2D future waypoints expressed in meters.
+        precision (float, optional): Maximum segment length before interpolation. Defaults to 0.2.
+
+    Returns:
+        List[np.ndarray]: Densified waypoint list anchored at the ego origin.
     """
     downsampled_waypoints = []
     downsampled_waypoints.append(np.array([0, 0]))
@@ -47,8 +69,15 @@ def downsample_waypoints(waypoints, precision=0.2):
 
 def collision_detections(map1, map2, threshold=0.04):
     """
-    map1: rendered surround vehicles
-    map2: self-car
+    Check if rendered occupancy maps overlap beyond a given ratio.
+
+    Args:
+        map1 (np.ndarray): Surrounding actors occupancy map.
+        map2 (np.ndarray): Ego-vehicle footprint occupancy map.
+        threshold (float, optional): Maximum tolerated overlap ratio. Defaults to 0.04.
+
+    Returns:
+        bool: `True` if overlap stays below the threshold (safe), else `False`.
     """
     assert map1.shape == map2.shape
     overlap_map = (map1 > 0.01) & (map2 > 0.01)
@@ -60,6 +89,19 @@ def collision_detections(map1, map2, threshold=0.04):
         return False
 
 def get_max_safe_distance(meta_data, downsampled_waypoints, t, collision_buffer, threshold):
+    """
+    Estimate the furthest distance the ego car can advance along planned waypoints safely.
+
+    Args:
+        meta_data (np.ndarray): Encoded actor features flattened from shape `(20, 20, 7)`.
+        downsampled_waypoints (Sequence[np.ndarray]): Waypoint samples ahead of the ego.
+        t (int): Time index used when rendering dynamic actors.
+        collision_buffer (np.ndarray): Extra margin added to the ego bounding box.
+        threshold (float): Allowed overlap ratio for collision detection.
+
+    Returns:
+        float: Safe travel distance along the path in meters.
+    """
     surround_map = render(meta_data.reshape(20, 20, 7), t=t)[0][:100, 40:140]
     if np.sum(surround_map) < 1:
         return np.linalg.norm(downsampled_waypoints[-3])
@@ -79,6 +121,12 @@ def get_max_safe_distance(meta_data, downsampled_waypoints, t, collision_buffer,
     return safe_distance
 
 class V2X_Controller(object):
+    """
+    Ego-vehicle controller that mixes PID steering/throttle with collision heuristics.
+
+    Combines predicted waypoints, target route information, and traffic metadata to
+    produce CARLA-compatible control commands.
+    """
     def __init__(self, config):
         self.turn_controller = PIDController(
             K_P=config['turn_KP'], 
@@ -110,38 +158,38 @@ class V2X_Controller(object):
         self, route_info
     ):
         """
-        Currently, we generate the desired speed according to predicted waypoints only!
-        In the next step, we need to consider the GLOBAL speed to finish the route in time.
+        Compute a single control step from localized route context and planner waypoints.
 
-        route_info: {
-            'speed': float, m/s, current speed,
-            'waypoints': [float list], 10 * 2, m,
-            'target':
-            'route_length': m,
-            'route_time': s,
-            'drive_length': m,
-            'drive_time': s
-        }
+        Args:
+            route_info (Dict[str, Any]): Ego telemetry, target waypoint bundle, and route metadata.
+
+        Returns:
+            Tuple[float, float, bool, Dict[int, str]]: Steering, throttle, brake flag, and debug text.
         """
         speed = route_info['speed']
         waypoints = np.array(route_info['waypoints'])
+
+        # Keep track of how long vehicle has been stationary
         if speed < 0.2:
             self.stop_steps += 1
         else:
             self.stop_steps = max(0, self.stop_steps - 10)
 
+        # Compute steering based on a weighted combination of route waypoints and target direction
         aim = route_info['target']
         aim_wp = (waypoints[-2] + waypoints[-1]) / 2.0
         theta_tg = np.arctan2(aim[0], aim[1]+0.0000001)
         
         angle_tg = np.sign(theta_tg) * (180 - np.abs(np.degrees(theta_tg))) / 90
         angle_wp = np.degrees(np.pi / 2 - np.arctan2(aim_wp[1], aim_wp[0]+0.0000005)) / 90
-
+        
         weight = 1
         angle = angle_wp * (1-weight) + angle_tg * weight
         if speed < 0.01:
             angle = 0
         # print(waypoints, aim, theta_, angle)
+        
+        # Update steering using the PID controller
         steer = self.turn_controller.step(angle)
         steer = np.clip(steer, -1.0, 1.0)
 
@@ -149,8 +197,8 @@ class V2X_Controller(object):
         # get desired speed according to the future waypoints
         displacement = np.linalg.norm(waypoints, ord=2, axis=1)
         desired_speed = np.mean(np.diff(displacement)[:3]) * 5 * self.config['max_speed'] / 5
-        # v 
 
+        # Adjust desired speed
         delta = np.clip(desired_speed - speed, 0.0, self.config['clip_delta'])
         throttle = self.speed_controller.step(delta)
         throttle = np.clip(throttle, 0.0, self.config['max_throttle'])
@@ -164,7 +212,7 @@ class V2X_Controller(object):
             self.stop_steps = 0
         if self.forced_forward_steps > 0:
             throttle = 0.8
-            brake = False
+            brake = False  # force recovery motion once we've been stationary for too long
             self.forced_forward_steps -= 1
 
 

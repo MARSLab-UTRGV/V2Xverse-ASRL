@@ -49,6 +49,16 @@ SAVE_PATH = os.environ.get("SAVE_PATH", 'eval')
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 
 def _numpy(carla_vector, normalize=False):
+    """
+    Convert a CARLA vector-like object into a NumPy array.
+
+    Args:
+        carla_vector: Object exposing `x` and `y` attributes.
+        normalize (bool, optional): Whether to return a unit-length vector. Defaults to False.
+
+    Returns:
+        np.ndarray: 2D vector `[x, y]` (optionally normalized).
+    """
     result = np.float32([carla_vector.x, carla_vector.y])
 
     if normalize:
@@ -58,13 +68,45 @@ def _numpy(carla_vector, normalize=False):
 
 
 def _location(x, y, z):
+    """
+    Build a CARLA `Location` from numeric coordinates.
+
+    Args:
+        x (float): X position in world frame.
+        y (float): Y position in world frame.
+        z (float): Z position in world frame.
+
+    Returns:
+        carla.Location: Populated CARLA location instance.
+    """
     return carla.Location(x=float(x), y=float(y), z=float(z))
 
 
 def _orientation(yaw):
+    """
+    Convert a yaw angle into a 2D unit forward vector.
+
+    Args:
+        yaw (float): Heading in degrees.
+
+    Returns:
+        np.ndarray: Unit vector `[cos(yaw), sin(yaw)]`.
+    """
     return np.float32([np.cos(np.radians(yaw)), np.sin(np.radians(yaw))])
 
 def get_collision(p1, v1, p2, v2):
+    """
+    Determine whether two actors on linear trajectories will intersect.
+
+    Args:
+        p1 (np.ndarray): Starting position of actor 1.
+        v1 (np.ndarray): Velocity vector of actor 1.
+        p2 (np.ndarray): Starting position of actor 2.
+        v2 (np.ndarray): Velocity vector of actor 2.
+
+    Returns:
+        Tuple[bool, Optional[np.ndarray]]: Collision flag and intersection point when applicable.
+    """
     A = np.stack([v1, -v2], 1)
     b = p2 - p1
 
@@ -77,7 +119,13 @@ def get_collision(p1, v1, p2, v2):
     return collides, p1 + x[0] * v1
 
 class DisplayInterface(object):
+	"""
+	Simple pygame-based dashboard for visualizing sensor streams and control metadata.
+
+	Combines RGB, LiDAR, and occupancy maps into a single surface for operator inspection.
+	"""
 	def __init__(self):
+		"""Initialize the pygame window and rendering buffers."""
 		self._width = 2300
 		self._height = 600
 		self._surface = None
@@ -91,6 +139,15 @@ class DisplayInterface(object):
 		pygame.display.set_caption("V2X Agent")
 
 	def run_interface(self, input_data):
+		"""
+		Render the aggregated sensor feeds and status text onto the display surface.
+
+		Args:
+			input_data (Dict[str, np.ndarray]): Pre-rendered images and status strings to composite.
+
+		Returns:
+			np.ndarray: RGB array of the final dashboard view.
+		"""
 		rgb = input_data['rgb']
 		map = input_data['map']
 		lidar = input_data['lidar']
@@ -149,19 +206,18 @@ class DisplayInterface(object):
 		return surface
 
 	def _quit(self):
+		"""Shut down pygame resources."""
 		pygame.quit()
 
 
 
 class BasePreprocessor(object):
     """
-    Basic Lidar pre-processor.
-    Parameters
-    ----------
-    preprocess_params : dict
-        The dictionary containing all parameters of the preprocessing.
-    train : bool
-        Train or test mode.
+    Base class for LiDAR preprocessing utilities.
+
+    Args:
+        preprocess_params (dict): Configuration dictionary describing voxelization bounds.
+        train (bool): Flag indicating whether preprocessing runs in training mode.
     """
 
     def __init__(self, preprocess_params, train):
@@ -171,6 +227,13 @@ class BasePreprocessor(object):
 
 class SpVoxelPreprocessor(BasePreprocessor):
     def __init__(self, preprocess_params, train):
+        """
+        Preprocess raw point clouds into sparse voxels compatible with spconv pipelines.
+
+        Args:
+            preprocess_params (dict): Parameters specifying voxel size, point limits, and ranges.
+            train (bool): Controls whether to use training or inference voxel count limits.
+        """
         super(SpVoxelPreprocessor, self).__init__(preprocess_params,
                                                   train)
         try:
@@ -200,6 +263,15 @@ class SpVoxelPreprocessor(BasePreprocessor):
         )
 
     def preprocess(self, pcd_np):
+        """
+        Voxelize a LiDAR point cloud.
+
+        Args:
+            pcd_np (np.ndarray): Raw point cloud with shape `(N, >=3)`.
+
+        Returns:
+            Dict[str, np.ndarray]: Voxel features, coordinates, and per-voxel point counts.
+        """
         data_dict = {}
         voxel_output = self.voxel_generator.generate(pcd_np)
         if isinstance(voxel_output, dict):
@@ -218,7 +290,19 @@ class SpVoxelPreprocessor(BasePreprocessor):
 
 def transform_2d_points(xyz, r1, t1_x, t1_y, r2, t2_x, t2_y):
     """
-    Build a rotation matrix and take the dot product.
+    Transform 2D homogeneous points from frame `r1` into frame `r2`.
+
+    Args:
+        xyz (np.ndarray): Array of shape `(N, 3)` containing `[x, y, z]` samples (z ignored).
+        r1 (float): Rotation of the source frame in radians.
+        t1_x (float): X translation of the source frame.
+        t1_y (float): Y translation of the source frame.
+        r2 (float): Rotation of the destination frame in radians.
+        t2_x (float): X translation of the destination frame.
+        t2_y (float): Y translation of the destination frame.
+
+    Returns:
+        np.ndarray: Points expressed in the destination frame with original z restored.
     """
     # z value to 1 for rotation
     xy1 = xyz.copy()
@@ -244,12 +328,31 @@ def transform_2d_points(xyz, r1, t1_x, t1_y, r2, t2_x, t2_y):
     return out
 
 def turn_back_into_theta(input):
+    """
+    Convert sine/cosine heading encoding back into angle representation.
+
+    Args:
+        input (torch.Tensor): Tensor shaped `[B, K, C, H, W]` where channels encode sin/cos.
+
+    Returns:
+        torch.Tensor: Tensor with the penultimate channel replaced by `atan2(sin, cos)`.
+    """
     B,K,_,H,W = input.shape
     output = torch.cat([input[:,:,:2],torch.atan2(input[:,:,2:3], input[:,:,-1:]),input[:,:,3:]],dim=2)
     assert output.shape[2] == input.shape[2]
     return output
 
 def turn_traffic_into_map(all_bbox, det_range):
+    """
+    Rasterize detected bounding boxes into an occupancy map.
+
+    Args:
+        all_bbox (np.ndarray): Array of shape `(N, 4, 2)` describing convex hull corners per actor.
+        det_range (Sequence[float]): Extents `[front, back, left, right, resolution]` in meters.
+
+    Returns:
+        np.ndarray: Occupancy grid stack with shape `(1, H, W)` representing traffic layout.
+    """
     data_total = []
     for idx in range(1):
 
@@ -291,18 +394,13 @@ def turn_traffic_into_map(all_bbox, det_range):
 
 def x_to_world(pose):
     """
-    The transformation matrix from x-coordinate system to carla world system
-    Also is the pose in world coordinate: T_world_x
+    Convert a local lidar pose into a homogeneous transform `T_world_x`.
 
-    Parameters
-    ----------
-    pose : list
-        [x, y, z, roll, yaw, pitch], degree
-        [x, y, roll], radians
-    Returns
-    -------
-    matrix : np.ndarray
-        The transformation matrix.
+    Args:
+        pose (Sequence[float]): `[x, y, roll]` pose expressed in radians/meters.
+
+    Returns:
+        np.ndarray: 4×4 transformation matrix mapping local coordinates to world space.
     """
     x, y, roll= pose[:]
     z = 0
@@ -330,22 +428,14 @@ def x_to_world(pose):
 
 def get_pairwise_transformation(pose, max_cav):
     """
-    Get pair-wise transformation matrix accross different agents.
+    Build pair-wise transformation matrices across connected agents.
 
-    Parameters
-    ----------
-    base_data_dict : dict
-        Key : cav id, item: transformation matrix to ego, lidar points.
+    Args:
+        pose (np.ndarray): Array of shape `(max_cav, 3)` containing `[x, y, roll]`.
+        max_cav (int): Maximum number of collaborating vehicles considered in the scene.
 
-    max_cav : int
-        The maximum number of cav, default 5
-
-    Return
-    ------
-    pairwise_t_matrix : np.array
-        The pairwise transformation matrix across each cav.
-        shape: (L, L, 4, 4), L is the max cav number in a scene
-        pairwise_t_matrix[i, j] is Tji, i_to_j
+    Returns:
+        np.ndarray: Tensor `(max_cav, max_cav, 4, 4)` where `T[i, j]` maps agent `i` to `j`.
     """
     pairwise_t_matrix = np.tile(np.eye(4), (max_cav, max_cav, 1, 1)) # (L, L, 4, 4)
 
@@ -370,6 +460,18 @@ def get_pairwise_transformation(pose, max_cav):
 
 def warp_affine_simple(src, M, dsize,
         align_corners=False):
+    """
+    Apply a batched affine warp using PyTorch's grid sampling.
+
+    Args:
+        src (torch.Tensor): Source feature map of shape `[B, C, H, W]` (batch size, channels, height, width).
+        M (torch.Tensor): Affine matrices with shape `[B, 2, 3]`.
+        dsize (Tuple[int, int]): Output height and width.
+        align_corners (bool, optional): Align corners flag for grid_sample. Defaults to False.
+
+    Returns:
+        torch.Tensor: Warped feature map of shape `[B, C, dsize[0], dsize[1]]`.
+    """
 
     B, C, H, W = src.size()
     grid = F.affine_grid(M,
@@ -382,6 +484,16 @@ def warp_image(det_pose, occ_map):
     det_pose: B, T_p, 3, torch.Tensor
     occ_map: B, T_p, C, H, W, torch.Tensor
     '''
+    """
+    Warp multi-agent occupancy grids into the ego frame for each timestep.
+
+    Args:
+        det_pose (torch.Tensor): Detector poses `[B, T, 3]` containing `[x, y, yaw]`.
+        occ_map (torch.Tensor): Occupancy or feature maps `[B, T, C, H, W]`.
+
+    Returns:
+        torch.Tensor: Ego-aligned occupancy stack `[B, T, C, H, W]`.
+    """
     B, T, C, H, W = occ_map.shape
     occ_fused = []
     for b in range(B):
@@ -406,7 +518,24 @@ def warp_image(det_pose, occ_map):
 
 
 class PnP_infer():
+	"""
+	End-to-end perception-and-planning inference pipeline for multi-ego V2X agents.
+
+	Manages sensor preprocessing, model invocation, visualization, and conversion of
+	network outputs into CARLA control commands for each ego vehicle.
+	"""
 	def __init__(self, config=None, ego_vehicles_num=1, perception_model=None, planning_model=None, perception_dataloader=None, device=None) -> None:
+		"""
+		Initialize stateful resources for multi-agent inference.
+
+		Args:
+			config (dict, optional): Experiment configuration including control hyperparameters.
+			ego_vehicles_num (int, optional): Number of ego vehicles controlled simultaneously.
+			perception_model (torch.nn.Module, optional): Cooperative perception network.
+			planning_model (torch.nn.Module, optional): End-to-end waypoint planner.
+			perception_dataloader (Iterable, optional): Iterator yielding cached detection batches.
+			device (torch.device, optional): Device on which models and tensors reside.
+		"""
 		self.config = config
 		self._hic = DisplayInterface()
 		self.ego_vehicles_num = ego_vehicles_num
@@ -478,17 +607,14 @@ class PnP_infer():
 		'''
 		generate the action for N cars from the record data.
 
-		Parameters
-		----------
-		car_data : list[ dict{}, dict{}, None, ...],
-		rsu_data : list[ dict{}, dict{}, None, ...],
-		model : trained model, probably we can store it in the initialization.
-		step : int, frame in the game, 20hz.
-		timestamp : float, time in the game.
-	
-		Returns
-		-------
-		controll_all: list, detailed actions for N cars.
+		Args:
+			car_data_raw (List[Optional[dict]]): Per-agent sensor/pose bundles from ego vehicles.
+			rsu_data_raw (List[Optional[dict]]): Road-side unit sensor packets.
+			step (int): Simulation frame index (20 Hz).
+			timestamp (float): Simulation time stamp in seconds.
+
+		Returns:
+			List[Optional[carla.VehicleControl]]: Control commands for each ego vehicle.
 		'''
 		
 		## communication latency, get data from 6 frames past (6*50ms = 300ms)
@@ -657,6 +783,12 @@ class PnP_infer():
 		return control_all
 	
 	def generate_planning_input(self):
+		"""
+		Assemble temporal occupancy and feature tensors for the planner.
+
+		Returns:
+			Dict[str, Any]: Occupancy stack, target offsets, and warped feature lists per agent.
+		"""
 		
 		occ_final = torch.zeros(self.ego_vehicles_num, 5, 6, 192, 96).cuda().float()
 		# N, T, C, H, W
@@ -732,6 +864,24 @@ class PnP_infer():
 		}
 
 	def generate_action_from_model_output(self, pred_waypoints_total, car_data_raw, rsu_data_raw, car_data, rsu_data, batch_data, planning_input, car_mask, step, timestamp):
+		"""
+		Convert network waypoint predictions into CARLA control commands.
+
+		Args:
+			pred_waypoints_total (torch.Tensor): Planned ego trajectories `[M, T, 2]`.
+			car_data_raw (List[dict]): Raw measurement packets per ego vehicle.
+			rsu_data_raw (List[dict]): RSU measurement packets.
+			car_data (List[dict]): Filtered ego data used for planning.
+			rsu_data (List[dict]): Filtered RSU data used for planning.
+			batch_data (dict): Collated perception batch for reference.
+			planning_input (dict): Prepared planner features and occupancy tensors.
+			car_mask (List[bool]): Availability mask per ego vehicle.
+			step (int): Simulation frame index.
+			timestamp (float): Simulation time seconds.
+
+		Returns:
+			List[Optional[carla.VehicleControl]]: Control decisions per ego agent.
+		"""
 		control_all = []
 		tick_data = []
 		ego_i = -1
@@ -884,6 +1034,13 @@ class PnP_infer():
 
 
 	def save(self, tick_data, frame):
+		"""
+		Save visualization artifacts for selected frames.
+
+		Args:
+			tick_data (List[dict]): Per-ego visualization buffers generated this step.
+			frame (int): Simulation frame index used for naming outputs.
+		"""
 		if frame % self.skip_frames != 0:
 			return
 		for ego_i in range(self.ego_vehicles_num):
@@ -899,6 +1056,15 @@ class PnP_infer():
 
 
 	def generate_last_info(self, measurements_last):
+		"""
+		Extract ego pose information for the previous timestep.
+
+		Args:
+			measurements_last (dict): Sensor measurements containing pose and target point.
+
+		Returns:
+			dict: Convenience dictionary with ego pose, rotation matrix, and local target.
+		"""
 		# print(measurements_last.keys())
 		ego_theta = measurements_last["theta"]
 		ego_x = measurements_last["gps_x"]
@@ -929,6 +1095,16 @@ class PnP_infer():
 	
 
 	def reduce_image(self, img, pixel_per_meter=1):
+		"""
+		Downsample an occupancy image using mean pooling.
+
+		Args:
+			img (np.ndarray): Source occupancy or rasterized map.
+			pixel_per_meter (int, optional): Pooling factor matching the render resolution. Defaults to 1.
+
+		Returns:
+			torch.Tensor: Cropped and pooled image tensor.
+		"""
 		img_after = block_reduce(img, block_size=(pixel_per_meter, pixel_per_meter), func=np.mean)
 		# occ_map: 75, 75
 		
@@ -942,6 +1118,16 @@ class PnP_infer():
 
 
 	def check_data(self, raw_data, car=True):
+		"""
+		Validate incoming agent packets and preprocess available entries.
+
+		Args:
+			raw_data (List[Optional[dict]]): Raw sensor/metadata records.
+			car (bool, optional): Flag indicating ego vehicle data (True) or RSU data (False).
+
+		Returns:
+			Tuple[List[Any], List[int]]: Preprocessed entries and binary mask of valid agents.
+		"""
 		mask = []
 		data = [] # without None
 		for i in raw_data:
@@ -955,6 +1141,16 @@ class PnP_infer():
 	
 
 	def preprocess_data(self, data, car=True):
+		"""
+		Normalize and augment a single agent packet with derived tensors.
+
+		Args:
+			data (dict): Raw measurement bundle containing LiDAR, camera, and metadata.
+			car (bool, optional): Whether the packet originates from an ego vehicle. Defaults to True.
+
+		Returns:
+			dict: Dictionary with rasterized maps, voxelized LiDAR, and auxiliary cues.
+		"""
 		output_record = {
 		}
 		
@@ -1019,6 +1215,16 @@ class PnP_infer():
 
 
 	def collect_actor_data_with_visibility(self, measurements, lidar_data):
+		"""
+		Convert world-frame actor annotations into the ego frame and flag visibility.
+
+		Args:
+			measurements (dict): Ego measurements (pose, sensor offsets).
+			lidar_data (np.ndarray): Raw LiDAR point cloud used to estimate occlusions.
+
+		Returns:
+			dict: Actor metadata augmented with LiDAR visibility booleans.
+		"""
 		lidar_data = lidar_data[:, :3]
 		lidar_data[:, 1] *= -1
 		actors_data = self.collect_actor_data()
@@ -1085,6 +1291,12 @@ class PnP_infer():
 
 
 	def collect_actor_data(self):
+		"""
+		Collect vehicles, walkers, bikes, and traffic infrastructure from CARLA.
+
+		Returns:
+			dict: Actor dictionary keyed by ID with pose, shape, velocity, and type metadata.
+		"""
 		data = {}
 		vehicles = CarlaDataProvider.get_world().get_actors().filter("*vehicle*")
 		for actor in vehicles:
@@ -1131,6 +1343,15 @@ class PnP_infer():
 		return data
 
 	def _should_brake(self, command=None):
+		"""
+		Evaluate surrounding context to determine if the ego vehicle should brake.
+
+		Args:
+			command (Optional[RoadOption]): High-level navigation intent.
+
+		Returns:
+			bool: True if any hazard (vehicle, bike, walker) is detected ahead.
+		"""
 		actors = CarlaDataProvider.get_world().get_actors()
 		self._map = CarlaDataProvider.get_world().get_map()
 
@@ -1177,6 +1398,14 @@ class PnP_infer():
 	def _is_actor_affected_by_stop(self, actor, stop, multi_step=20):
 		"""
 		Check if the given actor is affected by the stop
+
+		Args:
+			actor (carla.Actor): Actor being evaluated.
+			stop (carla.TrafficSign): Stop sign actor used as reference.
+			multi_step (int, optional): Number of future waypoints to inspect. Defaults to 20.
+
+		Returns:
+			bool: True when the actor intersects the stop trigger volume.
 		"""
 		affected = False
 		# first we run a fast coarse test
@@ -1207,6 +1436,16 @@ class PnP_infer():
 		return affected
 
 	def _is_junction_vehicle_hazard(self, vehicle_list, command):
+		"""
+		Detect potential collisions with vehicles inside or approaching a junction.
+
+		Args:
+			vehicle_list (List[carla.Vehicle]): Nearby vehicles.
+			command (RoadOption): Planned maneuver for the ego vehicle.
+
+		Returns:
+			List[carla.Vehicle]: Vehicles that pose an imminent junction hazard.
+		"""
 		res = []
 		o1 = _orientation(self._vehicle.get_transform().rotation.yaw)
 		x1 = self._vehicle.bounding_box.extent.x
@@ -1279,6 +1518,16 @@ class PnP_infer():
 		return res
 
 	def _is_lane_vehicle_hazard(self, vehicle_list, command):
+		"""
+		Check for slower vehicles in the ego lane when performing lane-change maneuvers.
+
+		Args:
+			vehicle_list (List[carla.Vehicle]): Nearby vehicles.
+			command (RoadOption): Planned navigation command.
+
+		Returns:
+			List[carla.Vehicle]: Vehicles that block or endanger the intended lane change.
+		"""
 		res = []
 		if (
 			command != RoadOption.CHANGELANELEFT
@@ -1357,6 +1606,18 @@ class PnP_infer():
 		return res
 
 	def _are_vehicles_crossing_future(self, p1, s1, lft_lane, rgt_lane):
+		"""
+		Check if a vehicle's projected path intersects the ego lane boundaries.
+
+		Args:
+			p1 (carla.Location): Vehicle position.
+			s1 (carla.Vector3D): Vehicle velocity vector.
+			lft_lane (carla.Location): Left boundary waypoint.
+			rgt_lane (carla.Location): Right boundary waypoint.
+
+		Returns:
+			bool: True if the projected trajectory crosses the lane boundary segment.
+		"""
 		p1_hat = carla.Location(x=p1.x + 3 * s1.x, y=p1.y + 3 * s1.y)
 		line1 = shapely.geometry.LineString([(p1.x, p1.y), (p1_hat.x, p1_hat.y)])
 		line2 = shapely.geometry.LineString(
@@ -1366,6 +1627,15 @@ class PnP_infer():
 		return not inter.is_empty
 
 	def _is_stop_sign_hazard(self, stop_sign_list):
+		"""
+		Determine whether the ego should stop for nearby stop signs.
+
+		Args:
+			stop_sign_list (List[carla.Actor]): Stop sign actors to evaluate.
+
+		Returns:
+			List[carla.Actor]: Stop signs requiring the ego vehicle to brake.
+		"""
 		res = []
 		if self._affected_by_stop[self.vehicle_num]:
 			if not self._stop_completed[self.vehicle_num]:
@@ -1404,6 +1674,15 @@ class PnP_infer():
 		return res
 
 	def _is_light_red(self, lights_list):
+		"""
+		Check whether a relevant traffic light is red or yellow for the ego vehicle.
+
+		Args:
+			lights_list (List[carla.Actor]): Traffic light actors in the scene.
+
+		Returns:
+			List[carla.Actor]: Active traffic lights requiring the ego vehicle to stop.
+		"""
 		if (
 			self._vehicle.get_traffic_light_state()
 			== carla.libcarla.TrafficLightState.Yellow or self._vehicle.get_traffic_light_state()
@@ -1425,6 +1704,16 @@ class PnP_infer():
 		return []
 
 	def _find_closest_valid_traffic_light(self, loc, min_dis):
+		"""
+		Find the nearest traffic light influencing the given location.
+
+		Args:
+			loc (carla.Location): Query point (typically vehicle position).
+			min_dis (float): Maximum distance threshold in meters.
+
+		Returns:
+			Optional[carla.Actor]: Traffic light actor if found, otherwise None.
+		"""
 		wp = self._map.get_waypoint(loc)
 		min_wp = None
 		min_distance = min_dis
@@ -1442,6 +1731,15 @@ class PnP_infer():
 
 
 	def _is_walker_hazard(self, walkers_list):
+		"""
+		Identify pedestrians whose projected motion conflicts with the ego path.
+
+		Args:
+			walkers_list (List[carla.Actor]): Nearby pedestrian actors.
+
+		Returns:
+			List[carla.Actor]: Walkers likely to intersect the ego trajectory.
+		"""
 		res = []
 		p1 = _numpy(self._vehicle.get_location())
 		v1 = 10.0 * _orientation(self._vehicle.get_transform().rotation.yaw)
@@ -1464,6 +1762,15 @@ class PnP_infer():
 		return res
 
 	def _is_bike_hazard(self, bikes_list):
+		"""
+		Identify bicycles that require braking to avoid collision.
+
+		Args:
+			bikes_list (List[carla.Actor]): Vehicles list including bikes.
+
+		Returns:
+			List[carla.Actor]: Bicycle actors on a collision course.
+		"""
 		res = []
 		o1 = _orientation(self._vehicle.get_transform().rotation.yaw)
 		v1_hat = o1
@@ -1506,6 +1813,16 @@ class PnP_infer():
 		return res
 
 	def _is_vehicle_hazard(self, vehicle_list, command=None):
+		"""
+		Detect cars directly blocking or intersecting the ego vehicle's lane.
+
+		Args:
+			vehicle_list (List[carla.Vehicle]): Nearby vehicle actors.
+			command (Optional[RoadOption]): Planned maneuver for additional filtering.
+
+		Returns:
+			List[carla.Vehicle]: Vehicles that should trigger braking.
+		"""
 		res = []
 		z = self._vehicle.get_location().z
 
@@ -1578,6 +1895,15 @@ class PnP_infer():
 
 	# load data
 	def _load_image(self, path):
+		"""
+		Load an image from the dataset, falling back to the previous frame if missing.
+
+		Args:
+			path (str): Relative file path within the dataset root.
+
+		Returns:
+			PIL.Image.Image: Loaded RGB image.
+		"""
 		try:
 			img = Image.open(self.root_path + path)
 		except Exception as e:
@@ -1588,6 +1914,15 @@ class PnP_infer():
 		return img
 	
 	def _load_json(self, path):
+		"""
+		Load a JSON metadata file with fallback to the preceding frame if absent.
+
+		Args:
+			path (str): Relative JSON path inside the dataset root.
+
+		Returns:
+			dict: Parsed JSON content.
+		"""
 		try:
 			json_value = json.load(open(self.root_path + path))
 		except Exception as e:
@@ -1598,6 +1933,15 @@ class PnP_infer():
 		return json_value
 
 	def _load_npy(self, path):
+		"""
+		Load a NumPy array from disk, retrying with the previous frame on failure.
+
+		Args:
+			path (str): Relative `.npy` path inside the dataset root.
+
+		Returns:
+			np.ndarray: Loaded NumPy array.
+		"""
 		try:
 			array = np.load(self.root_path + path, allow_pickle=True)
 		except Exception as e:
@@ -1610,7 +1954,15 @@ class PnP_infer():
 
 	def lidar_to_histogram_features(self, lidar, crop=256, lidar_range=[28,28,28,28]):
 		"""
-		Convert LiDAR point cloud into 2-bin histogram over 256x256 grid
+		Convert a LiDAR point cloud into stacked occupancy histograms.
+
+		Args:
+			lidar (np.ndarray): Point cloud `(N, 3+)` in ego frame.
+			crop (int, optional): Size of the output grid. Defaults to 256.
+			lidar_range (Sequence[int], optional): Range extents in meters `[front, back, left, right]`.
+
+		Returns:
+			numpy.ndarray: Histogram features with shape `(3, crop, crop)`.
 		"""
 
 		def splat_points(point_cloud):
@@ -1640,9 +1992,16 @@ class PnP_infer():
 		return features
 
 	def collate_batch_infer_perception(self, car_data: list, rsu_data: list) -> dict:
-		'''
-		Re-collate a batch
-		'''
+		"""
+		Assemble a cooperative perception batch for inference-time fusion.
+
+		Args:
+			car_data (List[dict]): Preprocessed ego vehicle records.
+			rsu_data (List[dict]): Preprocessed RSU records.
+
+		Returns:
+			Dict[str, torch.Tensor]: Batched LiDAR poses, features, targets, and record lengths.
+		"""
 
 		output_dict = {
             "lidar_pose": [],

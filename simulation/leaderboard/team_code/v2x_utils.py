@@ -19,6 +19,22 @@ EXTENT = [0]
 
 
 def add_rect(img, loc, ori, box, value, pixels_per_meter, max_distance, color):
+    """
+    Rasterize an oriented bounding box onto a bird's-eye-view canvas.
+
+    Args:
+        img (np.ndarray): Image buffer to be updated in place.
+        loc (np.ndarray): 2D center location in meters relative to ego.
+        ori (np.ndarray): Unit heading vector pointing along the longitudinal axis.
+        box (np.ndarray): Half-lengths along longitudinal and lateral directions (meters).
+        value (float): Intensity multiplier applied to the color channels.
+        pixels_per_meter (int): Resolution converting meters to pixels.
+        max_distance (float): Half-size of the rendered square in meters.
+        color (Sequence[float]): RGB scaling factors within [0, 1].
+
+    Returns:
+        np.ndarray: The modified image buffer containing the filled polygon.
+    """
     img_size = max_distance * pixels_per_meter * 2
     vet_ori = np.array([-ori[1], ori[0]])
     hor_offset = box[0] * ori
@@ -41,6 +57,15 @@ def add_rect(img, loc, ori, box, value, pixels_per_meter, max_distance, color):
 
 
 def get_yaw_angle(forward_vector):
+    """
+    Convert a forward-direction vector into a yaw angle.
+
+    Args:
+        forward_vector (np.ndarray): 2D direction vector.
+
+    Returns:
+        float: Heading in radians within [0, 2π).
+    """
     forward_vector = forward_vector / np.linalg.norm(forward_vector)
     yaw = math.acos(forward_vector[0])
     if forward_vector[1] < 0:
@@ -49,6 +74,17 @@ def get_yaw_angle(forward_vector):
 
 
 def generate_future_waypoints(measurements, pixels_per_meter=5, max_distance=30):
+    """
+    Render planned waypoints into a binary BEV image centered on the ego vehicle.
+
+    Args:
+        measurements (Dict[str, Any]): Contains keys `gps_x`, `gps_y`, `theta`, and `future_waypoints`.
+        pixels_per_meter (int, optional): Resolution of the BEV grid. Defaults to 5.
+        max_distance (float, optional): Half-width of the rendered map in meters. Defaults to 30.
+
+    Returns:
+        np.ndarray: Single-channel image marking future waypoints.
+    """
     img_size = max_distance * pixels_per_meter * 2
     img = np.zeros((img_size, img_size), np.uint8)
     ego_x = measurements["gps_x"]
@@ -78,6 +114,18 @@ def generate_future_waypoints(measurements, pixels_per_meter=5, max_distance=30)
 
 
 def generate_heatmap_multiclass(measurements, actors_data, max_distance=30, pixels_per_meter=8):
+    """
+    Produce separate occupancy heatmaps for each semantic actor class.
+
+    Args:
+        measurements (Dict[str, Any]): Ego measurement dictionary used for alignment.
+        actors_data (Dict[int, Dict[str, Any]]): Actor metadata keyed by ID with `tpe` labels.
+        max_distance (float, optional): Half-size of the rendered area in meters. Defaults to 30.
+        pixels_per_meter (int, optional): Resolution of the heatmap. Defaults to 8.
+
+    Returns:
+        Dict[int, np.ndarray]: Mapping from class ID to occupancy heatmap.
+    """
     actors_data_multiclass = {
         0: {}, 1: {}, 2: {}
     }
@@ -89,6 +137,18 @@ def generate_heatmap_multiclass(measurements, actors_data, max_distance=30, pixe
 
 
 def generate_heatmap(measurements, actors_data, max_distance=30, pixels_per_meter=8):
+    """
+    Render surrounding actors into a monochrome occupancy heatmap in ego coordinates.
+
+    Args:
+        measurements (Dict[str, Any]): Includes ego lidar pose, heading, and traffic light info.
+        actors_data (Dict[int, Dict[str, Any]]): Actor state dictionaries (location, orientation, box, type).
+        max_distance (float, optional): Half-width of the receptive field in meters. Defaults to 30.
+        pixels_per_meter (int, optional): Map resolution. Defaults to 8.
+
+    Returns:
+        np.ndarray: Single-channel occupancy image.
+    """
     img_size = max_distance * pixels_per_meter * 2
     img = np.zeros((img_size, img_size, 3), np.int)
     ego_x = measurements["lidar_pose_x"]
@@ -174,6 +234,20 @@ def generate_heatmap(measurements, actors_data, max_distance=30, pixels_per_mete
 
 
 def generate_relative_heatmap(measurements, actors_data, egp_pos, pixels_per_meter=5, max_distance=30, judge_visibility=False):
+    """
+    Render actors relative to an arbitrary observation pose (e.g., cooperative agent frame).
+
+    Args:
+        measurements (Dict[str, Any]): Measurement dictionary carrying traffic light context.
+        actors_data (Dict[int, Dict[str, Any]]): Actor metadata with fields like `loc`, `ori`, `box`, `lidar_visible`.
+        egp_pos (Dict[str, float]): Reference pose with keys `x`, `y`, and `theta`.
+        pixels_per_meter (int, optional): Grid resolution. Defaults to 5.
+        max_distance (float, optional): Half-width of the rendered area in meters. Defaults to 30.
+        judge_visibility (bool, optional): Skip actors not visible to lidar when True. Defaults to False.
+
+    Returns:
+        np.ndarray: Single-channel occupancy map centered on `egp_pos`.
+    """
     img_size = max_distance * pixels_per_meter * 2
     img = np.zeros((img_size, img_size, 3), np.int)
     ego_x = egp_pos["x"]
@@ -255,6 +329,20 @@ def generate_relative_heatmap(measurements, actors_data, egp_pos, pixels_per_met
 
 
 def render_self_car(loc, ori, box, pixels_per_meter=5, max_distance=36, color=None):
+    """
+    Draw the ego vehicle's footprint as a filled rectangle in BEV space.
+
+    Args:
+        loc (np.ndarray): 2D position of the vehicle center in meters.
+        ori (np.ndarray): Unit orientation vector pointing forward.
+        box (np.ndarray): Half-lengths representing vehicle dimensions.
+        pixels_per_meter (int, optional): Rasterization resolution. Defaults to 5.
+        max_distance (float, optional): Half-size of the rendered map in meters. Defaults to 36.
+        color (Optional[Sequence[float]]): RGB scaling coefficients; white if None.
+
+    Returns:
+        np.ndarray: Single-channel mask or RGB image depending on `color`.
+    """
     img_size = max_distance * pixels_per_meter * 2
     img = np.zeros((img_size, img_size, 3), np.uint8)
     if color is None:
@@ -273,6 +361,17 @@ def render_self_car(loc, ori, box, pixels_per_meter=5, max_distance=36, color=No
 
 
 def convert_grid_to_xy(i, j, det_range):
+    """
+    Convert detection grid indices into metric coordinates.
+
+    Args:
+        i (int): Row index within the detection tensor.
+        j (int): Column index within the detection tensor.
+        det_range (Sequence[float]): `[front, back, right, left, resolution]` definition.
+
+    Returns:
+        Tuple[float, float]: `(x, y)` location in meters relative to ego.
+    """
     x = det_range[4]*(j + 0.5) - det_range[2]
     y = det_range[0] - det_range[4]*(i+0.5)
     return x, y
@@ -281,6 +380,18 @@ def convert_grid_to_xy(i, j, det_range):
 def generate_det_data(
     heatmap, measurements, actors_data, det_range=[30,10,10,10, 0.8]
 ):
+    """
+    Assemble detection features (confidence, offsets, size, yaw, speed) per grid cell.
+
+    Args:
+        heatmap (np.ndarray): High-resolution occupancy heatmap.
+        measurements (Dict[str, Any]): Ego lidar pose (`lidar_pose_x`, `lidar_pose_y`, `theta`).
+        actors_data (Dict[int, Dict[str, Any]]): Actor annotations including `loc`, `ori`, `box`, and `vel`.
+        det_range (Sequence[float], optional): `[front, back, right, left, resolution]` specification.
+
+    Returns:
+        np.ndarray: Detection tensor of shape `(H, W, 7)`.
+    """
     res = det_range[4]
     max_distance = max(det_range)
     traffic_heatmap = block_reduce(heatmap, block_size=(int(8*res), int(8*res)), func=np.mean)
@@ -363,6 +474,18 @@ def generate_det_data(
 def generate_det_data_multiclass(
     heatmap, measurements, actors_data, det_range=[30,10,10,10, 0.8]
 ):  
+    """
+    Generate detection tensors separately for each semantic actor class.
+
+    Args:
+        heatmap (np.ndarray): Multi-channel heatmap indexed by actor class.
+        measurements (Dict[str, Any]): Ego pose metadata used for alignment.
+        actors_data (Dict[int, Dict[str, Any]]): Actor states with `tpe` denoting class.
+        det_range (Sequence[float], optional): Detection coverage parameters. Defaults to `[30,10,10,10,0.8]`.
+
+    Returns:
+        np.ndarray: Array of per-class detection tensors `(num_classes, H, W, 7)`.
+    """
     actors_data_multiclass = {
         0: {}, 1: {}, 2: {}
     }
@@ -376,6 +499,15 @@ def generate_det_data_multiclass(
 
 
 def check_numpy_to_torch(x):
+    """
+    Convert NumPy arrays to Torch tensors while tracking conversion.
+
+    Args:
+        x (Union[np.ndarray, torch.Tensor]): Input array or tensor.
+
+    Returns:
+        Tuple[torch.Tensor, bool]: Torch tensor and a flag indicating conversion occurred.
+    """
     if isinstance(x, np.ndarray):
         return torch.from_numpy(x).float(), True
     return x, False
@@ -384,10 +516,14 @@ def check_numpy_to_torch(x):
 
 def rotate_points_along_z(points, angle):
     """
+    Rotate batched 3D points around the z-axis.
+
     Args:
-        points: (B, N, 3 + C)
-        angle: (B), radians, angle along z-axis, angle increases x ==> y
+        points (Union[np.ndarray, torch.Tensor]): Shape `(B, N, 3 + C)` containing xyz and extra features.
+        angle (Union[np.ndarray, torch.Tensor]): Shape `(B,)` rotation angles in radians (positive rotates x→y).
+
     Returns:
+        Union[np.ndarray, torch.Tensor]: Rotated points preserving the input container type.
     """
     points, is_numpy = check_numpy_to_torch(points)
     angle, _ = check_numpy_to_torch(angle)
@@ -409,6 +545,18 @@ def rotate_points_along_z(points, angle):
 
 def boxes_to_corners_3d(boxes3d, order):
     """
+    Convert parameterized boxes into their 3D corner coordinates.
+
+    Args:
+        boxes3d (Union[np.ndarray, torch.Tensor]): Shape `(N, 7)` array describing
+            `[x, y, z, l, w, h, heading]` or `[x, y, z, h, w, l, heading]`.
+        order (str): Either `'lwh'` or `'hwl'`, indicating the layout of `(l, w, h)`.
+
+    Returns:
+        Union[np.ndarray, torch.Tensor]: Array of shape `(N, 8, 3)` listing each box corner.
+
+    Coordinate frame (OPV2V left-handed):
+
         4 -------- 5
        /|         /|
       7 -------- 6 .
@@ -416,24 +564,13 @@ def boxes_to_corners_3d(boxes3d, order):
       . 0 -------- 1
       |/         |/
       3 -------- 2
-    Parameters
-    __________
-    boxes3d: np.ndarray or torch.Tensor
-        (N, 7) [x, y, z, l, w, h, heading], or [x, y, z, h, w, l, heading]
-               (x, y, z) is the box center.
-    order : str
-        'lwh' or 'hwl'
-    Returns:
-        corners3d: np.ndarray or torch.Tensor
-        (N, 8, 3), the 8 corners of the bounding box.
-    opv2v's left hand coord 
-    
-    ^ z
-    |
-    |
-    | . x
-    |/
-    +-------> y
+
+        ^ z
+        |
+        |
+        | . x
+        |/
+        +-------> y
     """
 
     boxes3d, is_numpy = check_numpy_to_torch(boxes3d)
@@ -459,29 +596,14 @@ def boxes_to_corners_3d(boxes3d, order):
 
 def get_points_in_rotated_box_3d(p, box_corner):
     """
-    Get points within a rotated bounding box (3D version).
+    Filter 3D points that lie inside a rotated bounding box.
 
-    Parameters
-    ----------
-    p : numpy.array
-        Points to be tested with shape (N, 3).
-    box_corner : numpy.array
-        Corners of bounding box with shape (8, 3).
+    Args:
+        p (np.ndarray): Input points with shape `(N, 3)`.
+        box_corner (np.ndarray): Corner coordinates of the box with shape `(8, 3)`.
 
-            0 --------------------- 1         
-          ,"|                     ,"|       
-         3 --------------------- 2  |     
-         |  |                    |  |   
-         |  |                    |  |  
-         |  4  _ _ _ _ _ _ _ _ _ |  5 
-         |,"                     |," 
-         7 --------------------- 6
-
-    Returns
-    -------
-    p_in_box : numpy.array
-        Points within the box.
-
+    Returns:
+        np.ndarray: Subset of `p` that falls inside the box.
     """
     edge1 = box_corner[1, :] - box_corner[0, :]
     edge2 = box_corner[3, :] - box_corner[0, :]
@@ -507,25 +629,15 @@ def get_points_in_rotated_box_3d(p, box_corner):
 
 def get_projection_length_for_vector_projection(a, b):
     """
-    Get projection length for the Vector projection of a onto b s.t.
-    a_projected = length * b. (2D version) See
-    https://en.wikipedia.org/wiki/Vector_projection#Vector_projection_2
-    for more details.
+    Compute scalar projection lengths when projecting vectors `a` onto vector `b`.
 
-    Parameters
-    ----------
-    a : numpy.array
-        The vectors to be projected with shape (N, 2).
+    Args:
+        a (np.ndarray): Collection of vectors with shape `(N, 2)`.
+        b (np.ndarray): Reference vector of shape `(2,)`.
 
-    b : numpy.array
-        The vector that is projected onto with shape (2).
-
-    Returns
-    -------
-    length : numpy.array
-        The length of projected a with respect to b.
+    Returns:
+        np.ndarray: Projection lengths such that `a_proj = length * b`.
     """
     assert np.sum(b ** 2, axis=-1) > 1e-6
     length = a.dot(b) / np.sum(b ** 2, axis=-1)
     return length
-
