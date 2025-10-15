@@ -2,10 +2,27 @@ import numpy as np
 import cv2
 import math
 
+# weights for channels: [confidence, x, y, yaw, l, w, speed]
 reweight_array = np.array([1.0, 3.5, 3.5, 2.0, 3.5, 2.0, 8.0])
 
 
 def add_rect(img, loc, ori, box, value, pixels_per_meter, max_distance, color):
+    """
+    Paint an oriented rectangle onto an occupancy image.
+
+    Args:
+        img (np.ndarray): Canvas image the rectangle is drawn onto (modified in place).
+        loc (np.ndarray): Center position of the box in meters relative to ego.
+        ori (np.ndarray): Unit vector indicating the longitudinal direction of the box.
+        box (np.ndarray): Half-lengths of the box along longitudinal and lateral axes (meters).
+        value (float): Scalar intensity multiplier applied to `color`.
+        pixels_per_meter (int): Resolution that maps meters to pixels.
+        max_distance (int): Half-size of the rendered map in meters.
+        color (Sequence[float]): Base RGB color components in range [0, 1].
+
+    Returns:
+        np.ndarray: The updated image buffer with the rectangle filled in.
+    """
     img_size = max_distance * pixels_per_meter * 2
     vet_ori = np.array([-ori[1], ori[0]])
     hor_offset = box[0] * ori
@@ -28,12 +45,32 @@ def add_rect(img, loc, ori, box, value, pixels_per_meter, max_distance, color):
 
 
 def convert_grid_to_xy(i, j):
+    """
+    Convert grid indices from the detector output into metric offsets.
+
+    Args:
+        i (int): Row index in detector space.
+        j (int): Column index in detector space.
+
+    Returns:
+        Tuple[float, float]: Cartesian `(x, y)` coordinates in meters.
+    """
     x = j - 9.5
     y = 17.5 - i
     return x, y
 
 
 def find_peak_box(data):
+    """
+    Identify peak detections and categorize them by object type.
+
+    Args:
+        data (np.ndarray): Detector tensor of shape (20, 20, 7) scaled to highlight salient channels.
+
+    Returns:
+        Tuple[List[Tuple[int, int]], Dict[str, List[Tuple[int, int]]]]:
+            All peak grid indices and a mapping of object categories to their indices.
+    """
     det_data = np.zeros((22, 22, 7))
     det_data[1:21, 1:21] = data
     det_data[19:21, 1:21, 0] -= 0.1
@@ -41,7 +78,7 @@ def find_peak_box(data):
     for i in range(1, 21):
         for j in range(1, 21):
             if det_data[i, j, 0] > 0.9 or (
-                det_data[i, j, 0] > 0.4
+                det_data[i, j, 0] > 0.4         # Non-maximum suppression
                 and det_data[i, j, 0] > det_data[i, j - 1, 0]
                 and det_data[i, j, 0] > det_data[i, j + 1, 0]
                 and det_data[i, j, 0] > det_data[i + 1, j + 1, 0]
@@ -66,6 +103,21 @@ def find_peak_box(data):
 
 
 def render_self_car(loc, ori, box, pixels_per_meter=5, max_distance=18, color=None):
+    """
+    Render the ego vehicle footprint into an image buffer.
+
+    Args:
+        loc (np.ndarray): Ego position in meters relative to image center.
+        ori (np.ndarray): Unit vector representing vehicle heading.
+        box (np.ndarray): Half-lengths of the ego bounding box (meters).
+        pixels_per_meter (int, optional): Resolution scaling factor. Defaults to 5.
+        max_distance (int, optional): Half-size of the rendered map in meters. Defaults to 18.
+        color (Optional[Sequence[float]]): RGB color factors; defaults to white if omitted.
+
+    Returns:
+        np.ndarray: Single-channel occupancy image of the rendered ego car.
+    """
+    # Full image size
     img_size = max_distance * pixels_per_meter * 2
     img = np.zeros((img_size, img_size, 3), np.uint8)
     if color is None:
@@ -83,10 +135,23 @@ def render_self_car(loc, ori, box, pixels_per_meter=5, max_distance=18, color=No
 
 
 def render(det_data, pixels_per_meter=5, max_distance=18, t=0):
+    """
+    Produce an occupancy map of surrounding actors given detector predictions.
+
+    Args:
+        det_data (np.ndarray): Detector tensor of shape (20, 20, 7) describing nearby objects.
+        pixels_per_meter (int, optional): Resolution scaling factor. Defaults to 5.
+        max_distance (int, optional): Half-size of the rendered map in meters. Defaults to 18.
+        t (int, optional): Future timestep used for simple motion extrapolation. Defaults to 0.
+
+    Returns:
+        Tuple[np.ndarray, Dict[str, int]]: Rendered occupancy image and counts per object category.
+    """
     det_data = det_data * reweight_array
     box_ids, box_info = find_peak_box(det_data)
     img_size = max_distance * pixels_per_meter * 2
     img = np.zeros((img_size, img_size, 3), np.uint8)
+    # point of interest
     for poi in box_ids:
         i, j = poi
         if poi in box_info['bike']:
@@ -120,6 +185,18 @@ def render(det_data, pixels_per_meter=5, max_distance=18, t=0):
 
 
 def render_waypoints(waypoints, pixels_per_meter=5, max_distance=18, color=(0, 255, 0)):
+    """
+    Draw planned waypoints as circles in an occupancy image.
+
+    Args:
+        waypoints (Sequence[np.ndarray]): Iterable of 2D waypoint coordinates in meters.
+        pixels_per_meter (int, optional): Resolution scaling factor. Defaults to 5.
+        max_distance (int, optional): Half-size of the rendered map in meters. Defaults to 18.
+        color (Tuple[int, int, int], optional): BGR color used for waypoint markers. Defaults to green.
+
+    Returns:
+        np.ndarray: Color image with waypoint markers rendered.
+    """
     img_size = max_distance * pixels_per_meter * 2
     img = np.zeros((img_size, img_size, 3), np.uint8)
     for i in range(len(waypoints)):

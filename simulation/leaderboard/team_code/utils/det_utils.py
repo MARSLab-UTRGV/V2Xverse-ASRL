@@ -13,6 +13,16 @@ from .heatmap_utils import generate_heatmap, get_yaw_angle
 
 
 def convert_grid_to_xy(i, j):
+    """
+    Map detector grid indices to ego-centric metric coordinates.
+
+    Args:
+        i (int): Row index in the downsampled occupancy grid.
+        j (int): Column index in the downsampled occupancy grid.
+
+    Returns:
+        Tuple[float, float]: Cartesian `(x, y)` offsets in meters relative to the ego pose.
+    """
     x = j - 9.5
     y = 17.5 - i
     return x, y
@@ -21,11 +31,25 @@ def convert_grid_to_xy(i, j):
 def generate_det_data(
     heatmap, measurements, actors_data, pixels_per_meter=5, max_distance=18
 ):
+    """
+    Construct a coarse detector tensor summarizing nearby actors per grid cell.
+
+    Args:
+        heatmap (np.ndarray): Ego-centric occupancy heatmap prior to downsampling.
+        measurements (Dict[str, Any]): Ego vehicle state containing pose and other metadata.
+        actors_data (Dict[Any, Dict[str, Any]]): Dynamic actor annotations with pose, dimensions, and velocity.
+        pixels_per_meter (int, optional): Resolution of the source heatmap. Defaults to 5.
+        max_distance (int, optional): Half-size of the rendered observation area in meters. Defaults to 18.
+
+    Returns:
+        np.ndarray: Array of shape `(20, 20, 7)` with per-cell detection features.
+    """
     traffic_heatmap = block_reduce(heatmap, block_size=(5, 5), func=np.mean)
     traffic_heatmap = np.clip(traffic_heatmap, 0.0, 255.0)
     traffic_heatmap = traffic_heatmap[:20, 8:28]
     det_data = np.zeros((20, 20, 7))
 
+    # Transform all actors to ego-vehicle's frame of reference
     ego_x = measurements["x"]
     ego_y = measurements["y"]
     ego_theta = measurements["theta"]
@@ -64,6 +88,7 @@ def generate_det_data(
             center_x, center_y = convert_grid_to_xy(i, j)
             min_dis = 1000
             min_id = None
+            # Identify the actor track whose footprint is closest to this grid cell center.
             for _id in actors_data:
                 loc = actors_data[_id]["loc"][:2]
                 ori = actors_data[_id]["ori"][:2]
