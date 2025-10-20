@@ -8,7 +8,9 @@
 """
 CARLA Challenge Evaluator Routes
 
-Provisional code to evaluate Autonomous Agents for the CARLA Autonomous Driving challenge
+Extended evaluator that augments the upstream CARLA leaderboard harness with
+route-parameter management, deterministic seeding, scenario replay utilities,
+and logging helpers used by the V2Xverse experiments.
 """
 from __future__ import print_function
 
@@ -47,6 +49,17 @@ from leaderboard.utils.statistics_manager import StatisticsManager
 from leaderboard.utils.route_indexer import RouteIndexer
 
 def check_log_file(file_path, target_string):
+    """
+    Check whether a log file already contains a given marker.
+
+    Args:
+        file_path (str): Absolute path to the log file that should be scanned.
+        target_string (str): Substring that marks the condition we want to validate.
+
+    Returns:
+        bool: ``True`` if the substring is present, ``False`` otherwise. Missing files
+        are treated as a failure and logged to stdout.
+    """
     try:
         # 打开文件
         with open(file_path, 'r') as file:
@@ -65,6 +78,8 @@ def check_log_file(file_path, target_string):
         print(f"文件 '{file_path}' 不存在")
 
 class Logger(object):
+    """File-backed stdout proxy that timestamps every emitted line."""
+
     def __init__(self, file_name = 'temp.log', stream = sys.stdout) -> None:
         self.terminal = stream
         self.file_name = file_name
@@ -87,6 +102,19 @@ class Logger(object):
         pass
 
 def backup_script(full_path, folders_to_save=["simulation/leaderboard/leaderboard","simulation/leaderboard/team_code", "simulation/scenario_runner"]):
+    """
+    Copy source snapshots into the evaluation output directory.
+
+    Args:
+        full_path (str): Directory where the ``scripts`` backup folder should be
+            created. Typically this is ``RESULT_ROOT`` so runs remain reproducible.
+        folders_to_save (List[str]): Relative paths (from repo root) that will be
+            recursively copied beneath ``full_path/scripts``. Defaults to the
+            leaderboard harness, team code, and scenario runner.
+
+    Returns:
+        None
+    """
     target_folder = os.path.join(full_path, 'scripts')
     if not os.path.exists(target_folder):
         os.mkdir(target_folder)
@@ -117,7 +145,11 @@ sensors_to_icons = {
 class LeaderboardEvaluator(object):
 
     """
-    TODO: document me!
+    Parameterised evaluator that orchestrates CARLA simulation runs.
+
+    This variant mirrors the upstream leaderboard class while introducing extra
+    tooling (scenario-parameter YAML, deterministic seeding, log backups) that
+    the V2Xverse experiments rely on.
     """
 
     ego_vehicles = []
@@ -129,8 +161,16 @@ class LeaderboardEvaluator(object):
 
     def __init__(self, args, statistics_manager):
         """
-        Setup CARLA client and world
-        Setup ScenarioManager
+        Instantiate the evaluator with the CARLA back-end and bookkeeping helpers.
+
+        Args:
+            args (argparse.Namespace): Parsed CLI arguments controlling connection
+                parameters, agent entry point, seeds, and scenario configuration.
+            statistics_manager (List[StatisticsManager]): Per-ego statistics
+                collectors used to accumulate route and global metrics.
+
+        Returns:
+            None
         """
         self.statistics_manager = statistics_manager
         self.sensors = None
@@ -172,7 +212,14 @@ class LeaderboardEvaluator(object):
 
     def _signal_handler(self, signum, frame):
         """
-        Terminate scenario ticking when receiving a signal interrupt
+        Terminate scenario ticking when receiving a signal interrupt.
+
+        Args:
+            signum (int): POSIX signal number delivered to the process.
+            frame (FrameType): Execution frame at the time of the signal.
+
+        Returns:
+            None
         """
         if self._agent_watchdog and not self._agent_watchdog.get_status():
             raise RuntimeError("Timeout: Agent took too long to setup")
@@ -181,7 +228,10 @@ class LeaderboardEvaluator(object):
 
     def __del__(self):
         """
-        Cleanup and delete actors, ScenarioManager and CARLA world
+        Cleanup and delete actors, ScenarioManager and CARLA world.
+
+        Returns:
+            None
         """
 
         self._cleanup()
@@ -192,7 +242,10 @@ class LeaderboardEvaluator(object):
 
     def _cleanup(self):
         """
-        Remove and destroy all actors
+        Remove spawned actors and restore synchronous state.
+
+        Returns:
+            None
         """
 
         # Simulation still running and in synchronous mode?
@@ -229,7 +282,17 @@ class LeaderboardEvaluator(object):
 
     def _prepare_ego_vehicles(self, ego_vehicles, wait_for_ego_vehicles=False):
         """
-        Spawn or update the ego vehicles
+        Spawn fresh ego vehicles or reattach to existing ones in the scene.
+
+        Args:
+            ego_vehicles (List[RouteConfiguration.EgoVehicle]): Actor blueprints and
+                transforms describing the required ego fleet for the route.
+            wait_for_ego_vehicles (bool): When ``True`` the method searches for
+                already-spawned actors with matching role names instead of requesting
+                new ones, allowing hot-reload scenarios.
+
+        Returns:
+            None
         """
 
         if not wait_for_ego_vehicles:
@@ -265,7 +328,17 @@ class LeaderboardEvaluator(object):
 
     def _load_and_wait_for_world(self, args, town, ego_vehicles=None):
         """
-        Load a new CARLA world and provide data to CarlaDataProvider
+        Load a deterministic CARLA world and configure provider singletons.
+
+        Args:
+            args (argparse.Namespace): Simulation arguments containing seeds and port
+                configuration for CARLA services.
+            town (str): Map name (e.g. ``Town05``) required by the current route.
+            ego_vehicles (Optional[List]): Unused here, kept for interface parity with
+                the upstream implementation.
+
+        Returns:
+            None
         """
 
         self.world = self.client.load_world(town)
@@ -304,7 +377,17 @@ class LeaderboardEvaluator(object):
 
     def _register_statistics(self, config, ego_car_num, checkpoint, entry_status, crash_message="",):
         """
-        Computes and saved the simulation statistics
+        Compute and persist per-route statistics after a scenario completes.
+
+        Args:
+            config (RouteScenarioConfiguration): Scenario parameters for the route.
+            ego_car_num (int): Number of ego vehicles currently evaluated.
+            checkpoint (str): Path to the JSON checkpoint used for incremental saving.
+            entry_status (str): High-level status for the run (Started/Completed/etc.).
+            crash_message (str, optional): Description explaining abnormal terminations.
+
+        Returns:
+            None
         """
         # register statistics
         
@@ -335,9 +418,11 @@ class LeaderboardEvaluator(object):
         continue from the next one, or report a crash and stop.
 
         Args:
-            args: argparse.Namespace, global config
-            config: srunner.scenarioconfigs.route_scenario_configuration.RouteScenarioConfiguration, config for route scenarios
+            args (argparse.Namespace): Parsed CLI arguments controlling the run.
+            config (RouteScenarioConfiguration): Scenario description for the next route.
 
+        Returns:
+            None
         """
         crash_message = ""
         entry_status = "Started"
@@ -536,7 +621,14 @@ class LeaderboardEvaluator(object):
 
     def run(self, args: argparse.Namespace):
         """
-        Run the challenge mode
+        Iterate through the requested route set until completion.
+
+        Args:
+            args (argparse.Namespace): Parsed CLI arguments used to drive the
+                route indexer, resumption behaviour, and post-processing.
+
+        Returns:
+            None
         """
 
         route_indexer = RouteIndexer(args.routes, args.scenarios, args.repetitions)
@@ -590,6 +682,15 @@ class LeaderboardEvaluator(object):
             traceback.print_exc(file=open(self.log_file_dir,'a'))      
 
 def main():
+    """
+    CLI entry point for the parameterised leaderboard evaluator.
+
+    Parses command-line arguments, performs optional log-based skipping, sets up
+    statistics managers, and executes the evaluation loop.
+
+    Returns:
+        None
+    """
     description = "CARLA AD Leaderboard Evaluation: evaluate your Agent in CARLA scenarios\n"
 
     # general parameters

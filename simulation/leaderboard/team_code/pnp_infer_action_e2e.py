@@ -16,7 +16,7 @@ from torchvision import transforms
 from PIL import Image
 from skimage.measure import block_reduce
 import time
-from typing import OrderedDict
+from typing import Optional, OrderedDict, Tuple
 
 import matplotlib.pyplot as plt
 from team_code.planner import RoutePlanner
@@ -326,6 +326,60 @@ def transform_2d_points(xyz, r1, t1_x, t1_y, r2, t2_x, t2_y):
     out[:, 2] = xyz[:, 2]
 
     return out
+
+
+def _box_centers_and_yaws(
+    boxes: Optional[torch.Tensor],
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Compute center positions and heading angles for transformed 2D boxes.
+
+    Args:
+        boxes: Torch tensor shaped `[N, >=4, >=2]` in the destination frame.
+
+    Returns:
+        Tuple[np.ndarray, np.ndarray]: Centers `(N,2)` and yaws `(N,)`.
+    """
+    if boxes is None:
+        return np.zeros((0, 2), dtype=np.float32), np.zeros((0,), dtype=np.float32)
+
+    if isinstance(boxes, list):
+        if not boxes:
+            return np.zeros((0, 2), dtype=np.float32), np.zeros((0,), dtype=np.float32)
+        boxes = torch.stack(boxes, dim=0)
+
+    if not isinstance(boxes, torch.Tensor) or boxes.numel() == 0 or boxes.shape[0] == 0:
+        return np.zeros((0, 2), dtype=np.float32), np.zeros((0,), dtype=np.float32)
+
+    world_np = boxes[:, :4, :2].detach().cpu().numpy()
+    centers = world_np.mean(axis=1)
+    edge01 = world_np[:, 1] - world_np[:, 0]
+    yaws = np.arctan2(edge01[:, 1], edge01[:, 0])
+    return centers.astype(np.float32), yaws.astype(np.float32)
+
+
+def _estimate_obstacle_velocity(
+    prev_centers: Optional[np.ndarray],
+    curr_centers: np.ndarray,
+    dt: float,
+) -> np.ndarray:
+    """
+    Approximate obstacle velocities by finite differencing center positions.
+
+    Args:
+        prev_centers: Previous centers `(N,2)` or `None`.
+        curr_centers: Current centers `(N,2)`.
+        dt: Elapsed time between frames (seconds).
+
+    Returns:
+        np.ndarray: Estimated velocity vectors `(N,2)`.
+    """
+    if dt <= 1e-6 or curr_centers.size == 0:
+        return np.zeros((0, 2), dtype=np.float32)
+    if prev_centers is None or prev_centers.shape != curr_centers.shape:
+        return np.zeros_like(curr_centers, dtype=np.float32)
+    return (curr_centers - prev_centers) / dt
+
 
 def turn_back_into_theta(input):
     """
@@ -755,21 +809,34 @@ class PnP_infer():
 		perception_results = output_dict['ego']
 		fused_feature_2 = perception_results['fused_feature'].permute(0,1,3,2) 
 		fused_feature_3 = torch.flip(fused_feature_2, dims=[2])
-		feature = fused_feature_3[:,:,:192,:]	
+		feature = fused_feature_3[:,:,:192,:]
+
+		boxes_for_state = processed_pred_box if isinstance(processed_pred_box, torch.Tensor) else None
+		curr_centers, curr_yaws = _box_centers_and_yaws(boxes_for_state)
 
 
 
 		self.perception_memory_bank.pop(0)
-		if len(self.perception_memory_bank)<5:
-			for _ in range(5 - len(self.perception_memory_bank)):
-				self.perception_memory_bank.append({
-					'occ_map': occ_map, # N, 1, H, W
-					'drivable_area': torch.stack(da), # N, 1, H, W
-					'detmap_pose': batch_data['detmap_pose'][:len(car_data_raw)], # N, 3
-					'target': batch_data['target'][:len(car_data_raw)], # N, 2
-					'feature': feature, # N, 128, H, W
-				})
-		
+		new_entry = {
+			'occ_map': occ_map,
+			'drivable_area': torch.stack(da),
+			'detmap_pose': batch_data['detmap_pose'][:len(car_data_raw)],
+			'target': batch_data['target'][:len(car_data_raw)],
+			'feature': feature,
+			'obstacle_centers': curr_centers.copy(),
+			'obstacle_yaws': curr_yaws.copy(),
+		}
+		self.perception_memory_bank.append(new_entry)
+		while len(self.perception_memory_bank) < 5:
+			self.perception_memory_bank.append({
+				'occ_map': occ_map,
+				'drivable_area': torch.stack(da),
+				'detmap_pose': batch_data['detmap_pose'][:len(car_data_raw)],
+				'target': batch_data['target'][:len(car_data_raw)],
+				'feature': feature,
+				'obstacle_centers': curr_centers.copy(),
+				'obstacle_yaws': curr_yaws.copy(),
+			})
 
 		### Turn the memoried perception output into planning input
 		planning_input = self.generate_planning_input() # planning_input['occupancy'] [1, 5, 6, 192, 96] planning_input['target'] [1,2]
@@ -897,19 +964,63 @@ class PnP_infer():
 			# get the data for current vehicle
 			pred_waypoints = np.around(pred_waypoints_total[ego_i].detach().cpu().numpy(), decimals=2)
 
+			speed_raw = car_data_raw[ego_i]['measurements']["speed"]
+			speed_scalar = float(np.asarray(speed_raw).squeeze())
+			target_raw = car_data_raw[ego_i]['measurements']["target_point"]
+
 			route_info = {
-				'speed': car_data_raw[ego_i]['measurements']["speed"],
+				'speed': speed_raw,
 				'waypoints': pred_waypoints,
-				'target': car_data_raw[ego_i]['measurements']["target_point"],
+				'target': target_raw,
 				'route_length': 0,
 				'route_time': 0,
 				'drive_length': 0,
 				'drive_time': 0
 			}
 
+			ego_theta = float(car_data_raw[ego_i]['measurements']["theta"])
+			ego_pose = (
+				float(car_data_raw[ego_i]['measurements']["lidar_pose_x"]),
+				float(car_data_raw[ego_i]['measurements']["lidar_pose_y"]),
+			)
+			ego_vel_xy = (
+				speed_scalar * math.cos(ego_theta),
+				speed_scalar * math.sin(ego_theta),
+			)
+			dt = self.config['simulation'].get('skip_frames', 1) * 0.05
+			prev_bank = self.perception_memory_bank[-2] if len(self.perception_memory_bank) > 1 else None
+			prev_centers = None if prev_bank is None else prev_bank.get('obstacle_centers')
+			curr_centers = self.perception_memory_bank[-1].get('obstacle_centers', np.zeros((0, 2), dtype=np.float32))
+			curr_yaws = self.perception_memory_bank[-1].get('obstacle_yaws', np.zeros((0,), dtype=np.float32))
+			velocities = _estimate_obstacle_velocity(prev_centers, curr_centers, dt)
+			obstacles = []
+			for idx, center_world in enumerate(curr_centers):
+				vel_xy = velocities[idx] if idx < len(velocities) else np.zeros(2, dtype=np.float32)
+				speed_j = float(np.linalg.norm(vel_xy))
+				yaw_j = float(curr_yaws[idx]) if idx < len(curr_yaws) else 0.0
+				obstacles.append({
+					'pos': (float(center_world[0]), float(center_world[1])),
+					'yaw': yaw_j,
+					'speed': speed_j,
+					'vel_xy': (float(vel_xy[0]), float(vel_xy[1])),
+					'size': (2.0, 1.0),
+				})
+
+			route_info.update({
+				'ego_pose': ego_pose,
+				'ego_heading': ego_theta,
+				'ego_speed_f': speed_scalar,
+				'ego_vel_xy': ego_vel_xy,
+				'obstacles': obstacles,
+				'dt': dt,
+			})
+
 			steer, throttle, brake, meta_infos = self.controller[ego_i].run_step(
 				route_info
 			)
+			if 'cbf_debug' in route_info:
+				meta_infos[3] = route_info['cbf_debug']
+				print(meta_infos[3])
 
 			if brake < 0.05:
 				brake = 0.0

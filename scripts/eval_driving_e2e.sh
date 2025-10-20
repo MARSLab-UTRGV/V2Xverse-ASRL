@@ -46,7 +46,7 @@ export TEAM_CONFIG=simulation/leaderboard/team_code/agent_config/pnp_config_$5.y
 
 export RESUME=0
 export EGO_NUM=1
-export SKIP_EXISTED=1
+export SKIP_EXISTED=0
 
 mkdir -p $SAVE_PATH
 mkdir -p ${RESULT_ROOT}/${EVAL_SETTING}

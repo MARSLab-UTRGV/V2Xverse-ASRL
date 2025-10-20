@@ -1,3 +1,5 @@
+"""PnP multi-agent evaluation entrypoint wiring perception, planning, and control."""
+
 import imp
 import time
 import torch
@@ -39,20 +41,26 @@ from common.io import load_config_from_yaml
 from codriving import CODRIVING_REGISTRY
 from codriving.models.model_decoration import decorate_model
 
+
 def get_entry_point():
+    """
+    Return the leaderboard agent class name exposed by this module.
+
+    Returns:
+        str: Class name that the leaderboard harness should instantiate.
+    """
     return "PnP_Agent"
+
 
 def get_camera_intrinsic(sensor):
     """
     Retrieve the camera intrinsic matrix.
-    Parameters
-    ----------
-    sensor : carla.sensor
-        Carla rgb camera object.
-    Returns
-    -------
-    matrix_x : list
-        The 2d intrinsic matrix.
+
+    Args:
+        sensor (dict): CARLA sensor description containing width, height, and FOV.
+
+    Returns:
+        list: 3x3 intrinsic matrix in row-major order formatted as a nested list.
     """
     VIEW_WIDTH = int(sensor['width'])
     VIEW_HEIGHT = int(sensor['height'])
@@ -71,11 +79,14 @@ def get_camera_intrinsic(sensor):
 
 def get_camera_extrinsic(cur_extrin, ref_extrin):
     """
+    Compute the extrinsic matrix of a sensor relative to a reference transform.
+
     Args:
-        cur_extrin (carla.Transform): current extrinsic
-        ref_extrin (carla.Transform): reference extrinsic
+        cur_extrin (carla.Transform): Current sensor transform in world coordinates.
+        ref_extrin (carla.Transform): Reference transform used as the target frame.
+
     Returns:
-        extrin (list): 4x4 extrinsic matrix with respect to reference coordinate system 
+        list: 4x4 homogeneous transform from the current sensor frame to the reference.
     """
     extrin = np.array(ref_extrin.get_inverse_matrix()) @ np.array(cur_extrin.get_matrix())
     return extrin.tolist()
@@ -84,9 +95,23 @@ def get_camera_extrinsic(cur_extrin, ref_extrin):
 #### agents
 class PnP_Agent(autonomous_agent.AutonomousAgent):
     """
-    Navigated by a pipline with perception then prediction, from sensor data to control signal
+    Leaderboard agent that stitches cooperative perception with MotionNet planning.
+
+    The class follows the CARLA autonomous agent API: ``setup`` wires checkpoints
+    and configs, ``sensors`` declares required streams, and ``run_step`` (defined
+    below) produces control commands for each ego vehicle.
     """
     def setup(self, path_to_conf_file, ego_vehicles_num):
+        """
+        Load checkpoints, datasets, and core inference modules.
+
+        Args:
+            path_to_conf_file (str): Path to the YAML config selected by the harness.
+            ego_vehicles_num (int): Number of ego vehicles to control simultaneously.
+
+        Returns:
+            None
+        """
     
         self.agent_name = "pnp"
         self.wall_start = time.time()
@@ -162,7 +187,10 @@ class PnP_Agent(autonomous_agent.AutonomousAgent):
 
     def _init(self):
         """
-        initialization before the first step of simulation
+        Perform per-route initialization before the first control step.
+
+        Returns:
+            None
         """
         self._route_planner = RoutePlanner(2.0, 10.0)
         self._route_planner.set_route(self._global_plan, True)
@@ -180,17 +208,34 @@ class PnP_Agent(autonomous_agent.AutonomousAgent):
         )
 
     def _get_position(self, tick_data):
-        # GPS coordinate!
+        """
+        Convert raw GPS readings into the planner-aligned coordinate frame.
+
+        Args:
+            tick_data (dict): Sensor packet containing a ``"gps"`` numpy array.
+
+        Returns:
+            np.ndarray: 2D position in meters after mean/scale normalization.
+        """
         gps = tick_data["gps"]
         gps = (gps - self._route_planner.mean) * self._route_planner.scale
         return gps
     
     def get_save_path(self):
+        """
+        Retrieve the directory where evaluation artifacts are written.
+
+        Returns:
+            Optional[pathlib.Path]: Output folder managed by the inference module.
+        """
         return  self.infer.save_path   
     
     def pose_def(self):
         """
-        location of sensor related to vehicle
+        Define the relative placement of each onboard sensor.
+
+        Returns:
+            None
         """
         self.lidar_pose = carla.Transform(carla.Location(x=1.3,y=0.0,z=1.85),
                                         carla.Rotation(roll=0.0,pitch=0.0,yaw=-90.0))
@@ -206,7 +251,10 @@ class PnP_Agent(autonomous_agent.AutonomousAgent):
 
     def sensors(self):
         """
-        Return the sensor list.
+        Describe sensors consumed by the agent for registration with the simulator.
+
+        Returns:
+            list[dict]: CARLA sensor specifications for lidar, cameras, and other feeds.
         """
         self.pose_def()
         sensors_list = [

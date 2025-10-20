@@ -1,6 +1,7 @@
 import numpy as np
 from collections import deque
 from team_code.render_v2x import render, render_self_car
+from team_code.safety import FixedCBFLayer
 
 class PIDController(object):
     """
@@ -145,6 +146,8 @@ class V2X_Controller(object):
         self.detect_threshold = config['detect_threshold']
         self.stop_steps = 0
         self.forced_forward_steps = 0
+        self.control_dt = config.get('cbf_dt', 0.2)
+        self.cbf_layer = FixedCBFLayer(config) if config.get('use_cbf', False) else None
 
         self.red_light_steps = 0
         self.block_red_light = 0
@@ -166,8 +169,9 @@ class V2X_Controller(object):
         Returns:
             Tuple[float, float, bool, Dict[int, str]]: Steering, throttle, brake flag, and debug text.
         """
-        speed = route_info['speed']
-        waypoints = np.array(route_info['waypoints'])
+        speed_raw = route_info['speed']
+        speed = float(np.asarray(speed_raw).squeeze())
+        waypoints = np.asarray(route_info['waypoints'])
 
         # Keep track of how long vehicle has been stationary
         if speed < 0.2:
@@ -176,7 +180,7 @@ class V2X_Controller(object):
             self.stop_steps = max(0, self.stop_steps - 10)
 
         # Compute steering based on a weighted combination of route waypoints and target direction
-        aim = route_info['target']
+        aim = np.asarray(route_info['target'])
         aim_wp = (waypoints[-2] + waypoints[-1]) / 2.0
         theta_tg = np.arctan2(aim[0], aim[1]+0.0000001)
         
@@ -214,6 +218,20 @@ class V2X_Controller(object):
             throttle = 0.8
             brake = False  # force recovery motion once we've been stationary for too long
             self.forced_forward_steps -= 1
+
+        route_info['control_dt'] = self.control_dt
+        brake_float = 1.0 if brake else 0.0
+        nominal_cmd = {
+            'steer': float(steer),
+            'throttle': float(throttle),
+            'brake': brake_float,
+        }
+        if self.cbf_layer is not None:
+            steer, throttle, brake_float, cbf_diag = self.cbf_layer.project(nominal_cmd, route_info)
+            route_info['cbf_debug'] = cbf_diag
+        else:
+            route_info['cbf_debug'] = {'status': 'inactive'}
+        brake = brake_float
 
 
         meta_info_1 = "speed: %.2f, target_speed: %.2f, angle: %.2f, [%.2f, %.2f, %.2f, %.2f, %.2f]" % (
