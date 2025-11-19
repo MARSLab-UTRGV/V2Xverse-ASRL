@@ -67,6 +67,8 @@ db.sqlite3-journal
 instance/
 .webassets-cache
 
+# pdf
+*.pdf
 # Scrapy stuff:
 .scrapy
 
