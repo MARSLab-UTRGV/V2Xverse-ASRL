@@ -62,21 +62,32 @@ class ManeuverOppositeDirection(BasicScenario):
         self._third_actor_transform = None
         # Timeout of scenario in seconds
         self.timeout = timeout
+        default_params = {
+            'first_vehicle_location': 8,            # m
+            'second_vehicle_location': 16,          # m
+            'ego_vehicle_drive_distance': 32,       # m
+            'start_distance': 7.2,                  # m
+            'opposite_speed': 5.56,                 # m/s
+            'source_gap': 40,                       # m
+        }
         if scenario_parameter is None:
-            self._first_vehicle_location = 8 #  50
-            self._second_vehicle_location = self._first_vehicle_location + 8 # 60
-            self._ego_vehicle_drive_distance = self._second_vehicle_location * 2
-            self._start_distance = self._first_vehicle_location * 0.9
-            self._opposite_speed = 5.56   # m/s
-            self._source_gap = 40   # m
-        else:
-            # NOTE(GJH): Use scenario_parameter to assign.
-            self._first_vehicle_location = scenario_parameter['_first_vehicle_location']
-            self._second_vehicle_location = scenario_parameter['_second_vehicle_location']
-            self._ego_vehicle_drive_distance = scenario_parameter['_ego_vehicle_drive_distance']
-            self._start_distance = scenario_parameter['_start_distance']
-            self._opposite_speed = scenario_parameter['_opposite_speed']
-            self._source_gap = scenario_parameter['_source_gap']
+            scenario_parameter = {}
+
+        def _get_param(name):
+            underscored = "_" + name
+            if underscored in scenario_parameter:
+                return scenario_parameter[underscored]
+            if name in scenario_parameter:
+                return scenario_parameter[name]
+            return default_params[name]
+
+        # Accept both legacy underscored keys and yaml-style keys.
+        self._first_vehicle_location = _get_param('first_vehicle_location')
+        self._second_vehicle_location = _get_param('second_vehicle_location')
+        self._ego_vehicle_drive_distance = _get_param('ego_vehicle_drive_distance')
+        self._start_distance = _get_param('start_distance')
+        self._opposite_speed = _get_param('opposite_speed')
+        self._source_gap = _get_param('source_gap')
             
         super(ManeuverOppositeDirection, self).__init__(
             "ManeuverOppositeDirection",

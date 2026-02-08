@@ -154,6 +154,31 @@ class V2X_Controller(object):
         )
         self.stop_sign_trigger_times = 0
 
+    def compute_desired_speed(self, waypoints):
+        # Estimate a desired speed according to the future waypoints
+        displacement = np.linalg.norm(waypoints, ord=2, axis=1)
+        return np.mean(np.diff(displacement)[:3]) * 5 * self.config['max_speed'] / 5
+
+
+    def compute_throttle_brake(self, speed, desired_speed):
+        # Convert desired speed to throttle/brake using the longitudinal PID 
+        delta = np.clip(desired_speed - speed, 0.0, self.config['clip_delta'])
+        throttle = self.speed_controller.step(delta)
+        throttle = np.clip(throttle, 0.0, self.config['max_throttle'])
+
+        brake = speed > desired_speed * self.config['brake_ratio']
+
+        if self.stop_steps > 100:
+            self.forced_forward_steps = 12
+            self.stop_steps = 0
+        if self.forced_forward_steps > 0:
+            throttle = 0.8
+            brake = False
+            self.forced_forward_steps -= 1
+
+        return throttle, brake
+        
+   
     def run_step(
         self, route_info
     ):
@@ -195,26 +220,9 @@ class V2X_Controller(object):
 
         brake = False
         # get desired speed according to the future waypoints
-        displacement = np.linalg.norm(waypoints, ord=2, axis=1)
-        desired_speed = np.mean(np.diff(displacement)[:3]) * 5 * self.config['max_speed'] / 5
-
-        # Adjust desired speed
-        delta = np.clip(desired_speed - speed, 0.0, self.config['clip_delta'])
-        throttle = self.speed_controller.step(delta)
-        throttle = np.clip(throttle, 0.0, self.config['max_throttle'])
-
-        if speed > desired_speed * self.config['brake_ratio']:
-            brake = True
-
-        # stop for too long, force to forward
-        if self.stop_steps > 100:
-            self.forced_forward_steps = 12
-            self.stop_steps = 0
-        if self.forced_forward_steps > 0:
-            throttle = 0.8
-            brake = False  # force recovery motion once we've been stationary for too long
-            self.forced_forward_steps -= 1
-
+        desired_speed = self.compute_desired_speed(waypoints)
+       
+        throttle, brake = self.compute_throttle_brake(speed, desired_speed) 
 
         meta_info_1 = "speed: %.2f, target_speed: %.2f, angle: %.2f, [%.2f, %.2f, %.2f, %.2f, %.2f]" % (
             speed,
@@ -224,10 +232,14 @@ class V2X_Controller(object):
         meta_info_2 = "stop_steps:%d" % (
             self.stop_steps
         )
+        
         meta_info = {
             1: meta_info_1,
             2: meta_info_2,
+            "desired_speed": float(desired_speed),
+            "speed": float(speed),
         }
+        #print(meta_info)
 
 
         return steer, throttle, brake, meta_info

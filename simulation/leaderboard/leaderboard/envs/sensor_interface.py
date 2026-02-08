@@ -270,3 +270,12 @@ class SensorInterface(object):
             raise SensorReceivedNoData("A sensor took too long to send their data")
 
         return data_dict
+
+    def clear(self):
+        """
+        Clear all registered sensors and pending data.
+        """
+        self._sensors_objects = {}
+        self._data_buffers = {}
+        self._new_data_buffers = Queue()
+        self._opendrive_tag = None

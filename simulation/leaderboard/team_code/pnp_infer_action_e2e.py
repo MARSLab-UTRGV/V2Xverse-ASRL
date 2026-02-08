@@ -35,7 +35,8 @@ from team_code.v2x_utils import (generate_relative_heatmap,
 				 generate_heatmap, generate_det_data,
 				 get_yaw_angle, boxes_to_corners_3d, get_points_in_rotated_box_3d  # visibility related functions
 				 )
-
+from team_code.cbf_filter import CBFQPFilter
+from team_code.rl_trainer import CRPOTrainer
 from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
 from opencood.tools import train_utils
 from opencood.tools import train_utils, inference_utils
@@ -567,6 +568,75 @@ class PnP_infer():
 		self.perception_memory_bank = [{}]
 
 		self.controller = [V2X_Controller(self.config['control']) for _ in range(self.ego_vehicles_num)]
+		self._prev_route_progress = [0.0 for _ in range(self.ego_vehicles_num)]
+
+		cbf_config = self.config.get('cbf', {})
+		self.cbf_filter = CBFQPFilter(cbf_config)
+		# RL trainer for adaptive gammas (optional, independent config section)
+		rl_config = self.config.get('rl', {})
+		rl_log_dir = os.environ.get("RL_LOG_DIR")
+		if rl_log_dir:
+			rl_config = dict(rl_config)
+			rl_config["log_dir"] = rl_log_dir
+		self.use_rl = bool(rl_config.get("enabled", False)) and self.cbf_filter.enabled
+		self.rl_eval_only = bool(rl_config.get("eval_only", False))
+		self.rl_deterministic_eval = bool(rl_config.get("deterministic_eval", True))
+		self.gamma_range = rl_config.get("gamma_range", [0.05, 0.8])
+		self.rl_cost_d_safe = float(rl_config.get("cost_d_safe", 10.0))
+		self.rl_cost_distance = float(
+			rl_config.get("cost_distance", rl_config.get("rl_cost_distance", 2.5))
+		)
+		self.rl_cost_ttc_threshold = float(rl_config.get("cost_ttc_threshold", 3.0))
+		self.rl_cost_blend_mode = str(rl_config.get("cost_blend_mode", "max")).lower()
+		self.rl_cost_w_prox = float(rl_config.get("cost_w_prox", 0.6))
+		self.rl_cost_w_ttc = float(rl_config.get("cost_w_ttc", 0.4))
+		self.rl_terminal_collision = float(rl_config.get("cost_terminal_collision", 3.0))
+		if self.rl_cost_blend_mode != "max":
+			logging.warning(
+				"Unsupported rl.cost_blend_mode=%s, falling back to 'max'",
+				self.rl_cost_blend_mode,
+			)
+			self.rl_cost_blend_mode = "max"
+		self.rl_trainer = None
+		if self.use_rl:
+			rl_cfg = rl_config
+			resume_path = rl_cfg.get("resume_path", None)
+			if self.rl_eval_only:
+				if not resume_path or not os.path.exists(resume_path):
+					raise ValueError(
+						"rl.eval_only=true requires a valid rl.resume_path checkpoint, got: {}".format(
+							resume_path
+						)
+					)
+			self.rl_trainer = CRPOTrainer(
+				obs_dim=int(rl_cfg.get("obs_dim", 11)),
+				action_dim=int(rl_cfg.get("action_dim", 3)),
+				device=str(self.device),
+				n_steps=int(rl_cfg.get("n_steps", 2000)),
+				learning_rate=float(rl_cfg.get("learning_rate", 3e-4)),
+				gamma=float(rl_cfg.get("gamma", 0.99)),
+				gae_lambda=float(rl_cfg.get("gae_lambda", 0.95)),
+				clip_coef=float(rl_cfg.get("clip_coef", 0.2)),
+				update_epochs=int(rl_cfg.get("update_epochs", 10)),
+				num_minibatches=int(rl_cfg.get("num_minibatches", 32)),
+				ent_coef=float(rl_cfg.get("ent_coef", 0.0)),
+				vf_coef=float(rl_cfg.get("vf_coef", 0.5)),
+				max_grad_norm=float(rl_cfg.get("max_grad_norm", 0.5)),
+				cost_limit=float(rl_cfg.get("cost_limit", 0.1)),
+				lagrange_mult=float(rl_cfg.get("lagrange_mult", 1.0)),
+				lagrange_mult_max=float(rl_cfg.get("lagrange_mult_max", 100.0)),
+				use_pid_lagrangian=bool(rl_cfg.get("use_pid_lagrangian", True)),
+				pid_gains=tuple(rl_cfg.get("pid_gains", [1.0, 0.1, 0.1])),
+				pid_ema_alpha=float(rl_cfg.get("pid_ema_alpha", 0.95)),
+				pid_d_delay=int(rl_cfg.get("pid_d_delay", 1)),
+				log_dir=rl_cfg.get("log_dir", None),
+				save_every=int(rl_cfg.get("save_every", 10)),
+				log_scale=float(rl_cfg.get("log_scale", 1000.0)),
+				resume_path=resume_path,
+				eval_only=self.rl_eval_only,
+			)
+			if self.rl_eval_only:
+				self.rl_trainer.policy.eval()
 
 		self.input_lidar_size = 224
 		self.lidar_range = [36, 36, 36, 36]
@@ -586,21 +656,202 @@ class PnP_infer():
 		### generate the save files for images
 		self.skip_frames = self.config['simulation']['skip_frames']
 		self.save_path = None
-		if SAVE_PATH is not None:
-			now = datetime.datetime.now()
-			string = pathlib.Path(os.environ["ROUTES"]).stem + "_"
-			string += "_".join(
-				map(
-					lambda x: "%02d" % x,
-					(now.month, now.day, now.hour, now.minute, now.second),
-				)
+		# Route folder is created on on_route_start(); avoid an extra empty folder at startup.
+
+	def _init_save_path(self):
+		if SAVE_PATH is None:
+			self.save_path = None
+			return
+		now = datetime.datetime.now()
+		route_stem = pathlib.Path(os.environ.get("ROUTES", "route")).stem
+		pass_tag = os.environ.get("ROUTE_PASS")
+		prefix = "{}_".format(pass_tag) if pass_tag else ""
+		string = prefix + route_stem + "_"
+		string += "_".join(
+			map(
+				lambda x: "%02d" % x,
+				(now.month, now.day, now.hour, now.minute, now.second),
 			)
+		)
+		string += "_{:06d}".format(now.microsecond)
 
-			print(string)
+		print(string)
 
-			self.save_path = pathlib.Path(SAVE_PATH) / string
-			self.save_path.mkdir(parents=True, exist_ok=False)
-			(self.save_path / "meta").mkdir(parents=True, exist_ok=False)
+		self.save_path = pathlib.Path(SAVE_PATH) / string
+		self.save_path.mkdir(parents=True, exist_ok=False)
+		(self.save_path / "meta").mkdir(parents=True, exist_ok=False)
+
+	def _classify_actor(self, actor):
+		type_id = actor.type_id.lower()
+		if "walker" in type_id:
+			return "ped"
+		if "diamondback" in type_id or "bicycle" in type_id:
+			return "bike"
+		return "vehicle"
+
+	def _compute_type_stats(self, ego_actor, actors, max_distance=50.0):
+		stats = {
+			"vehicle": {"min_dist": max_distance, "closing": 0.0, "align": 0.0},
+			"ped": {"min_dist": max_distance, "closing": 0.0, "align": 0.0},
+			"bike": {"min_dist": max_distance, "closing": 0.0, "align": 0.0},
+		}
+
+		ego_loc = ego_actor.get_location()
+		ego_vel = ego_actor.get_velocity()
+		ego_fwd = ego_actor.get_transform().get_forward_vector()
+		ego_fwd_vec = np.array([ego_fwd.x, ego_fwd.y], dtype=np.float32)
+
+		min_dist_any = max_distance
+
+		for actor in actors:
+			if actor is None or actor.id == ego_actor.id or not actor.is_alive:
+				continue
+			loc = actor.get_location()
+			dist = loc.distance(ego_loc)
+			if dist > max_distance or dist < 1e-3:
+				continue
+
+			min_dist_any = min(min_dist_any, dist)
+			rel_pos = np.array([loc.x - ego_loc.x, loc.y - ego_loc.y], dtype=np.float32)
+			rel_dir = rel_pos / (np.linalg.norm(rel_pos) + 1e-6)
+			rel_vel = np.array(
+				[actor.get_velocity().x - ego_vel.x, actor.get_velocity().y - ego_vel.y],
+				dtype=np.float32,
+			)
+			rel_speed_along = float(np.dot(rel_dir, rel_vel))
+			closing_speed = max(0.0, -rel_speed_along)
+			heading_align = float(np.dot(ego_fwd_vec, rel_dir))
+
+			atype = self._classify_actor(actor)
+			if dist < stats[atype]["min_dist"]:
+				stats[atype]["min_dist"] = dist
+				stats[atype]["closing"] = closing_speed
+				stats[atype]["align"] = heading_align
+
+		return stats, min_dist_any
+
+	def _build_rl_obs(self, ego_actor, actors, desired_speed):
+		max_distance = float(self.cbf_filter.max_distance) if self.cbf_filter else 50.0
+		stats, min_dist_any = self._compute_type_stats(
+			ego_actor, actors, max_distance=max_distance
+		)
+
+		ego_vel = ego_actor.get_velocity()
+		v_ego = float(np.linalg.norm([ego_vel.x, ego_vel.y]))
+		dv = float(desired_speed - v_ego) if desired_speed is not None else 0.0
+
+		obs = np.array(
+			[
+				v_ego,
+				dv,
+				stats["vehicle"]["min_dist"],
+				stats["vehicle"]["closing"],
+				stats["vehicle"]["align"],
+				stats["ped"]["min_dist"],
+				stats["ped"]["closing"],
+				stats["ped"]["align"],
+				stats["bike"]["min_dist"],
+				stats["bike"]["closing"],
+				stats["bike"]["align"],
+			],
+			dtype=np.float32,
+		)
+		return obs, min_dist_any
+
+	def _compute_dense_rl_cost(self, ego_actor, actors):
+		"""
+		Compute dense per-step safety cost from per-actor proximity and TTC risk.
+
+		For actor i:
+		  u_i = (p_actor - p_ego) / ||p_actor - p_ego||
+		  v_rel = v_actor - v_ego
+		  closing_i = max(0, -dot(v_rel, u_i))
+		  c_prox_i in [0, 1] using (d_safe, d_collision) ramp
+		  c_ttc_i in [0, 1] from TTC threshold when closing_i > 0
+		  risk_i = max(c_prox_i, c_ttc_i)
+		"""
+		ego_loc = ego_actor.get_location()
+		ego_vel = ego_actor.get_velocity()
+		ego_vel_vec = np.array([ego_vel.x, ego_vel.y], dtype=np.float32)
+
+		d_safe = float(self.rl_cost_d_safe)
+		d_collision = float(self.rl_cost_distance)
+		ttc_threshold = float(self.rl_cost_ttc_threshold)
+		max_risk = 0.0
+
+		for actor in actors:
+			if actor is None or actor.id == ego_actor.id or not actor.is_alive:
+				continue
+			atype = self._classify_actor(actor)
+			if atype not in ("vehicle", "ped", "bike"):
+				continue
+
+			actor_loc = actor.get_location()
+			dist = actor_loc.distance(ego_loc)
+			if dist > d_safe or dist < 1e-3:
+				continue
+
+			rel_pos = np.array(
+				[actor_loc.x - ego_loc.x, actor_loc.y - ego_loc.y], dtype=np.float32
+			)
+			rel_dir = rel_pos / (np.linalg.norm(rel_pos) + 1e-6)
+			actor_vel = actor.get_velocity()
+			actor_vel_vec = np.array([actor_vel.x, actor_vel.y], dtype=np.float32)
+			v_rel = actor_vel_vec - ego_vel_vec
+			closing_speed = max(0.0, float(-np.dot(v_rel, rel_dir)))
+
+			if d_safe <= d_collision:
+				c_prox = 1.0 if dist <= d_collision else 0.0
+			elif dist <= d_collision:
+				c_prox = 1.0
+			elif dist >= d_safe:
+				c_prox = 0.0
+			else:
+				c_prox = float(
+					np.clip((d_safe - dist) / (d_safe - d_collision), 0.0, 1.0)
+				)
+
+			c_ttc = 0.0
+			if closing_speed > 0.0 and ttc_threshold > 0.0:
+				ttc = dist / (closing_speed + 1e-6)
+				if ttc < ttc_threshold:
+					c_ttc = float(np.clip(1.0 - ttc / ttc_threshold, 0.0, 1.0))
+
+			if self.rl_cost_blend_mode == "max":
+				risk_i = max(c_prox, c_ttc)
+			else:
+				risk_i = max(c_prox, c_ttc)
+
+			max_risk = max(max_risk, risk_i)
+
+		return float(np.clip(max_risk, 0.0, 1.0))
+
+	def _action_to_gammas(self, action):
+		gmin, gmax = self.gamma_range
+		action = np.clip(action, -1.0, 1.0)
+		gamma = (action + 1.0) / 2.0 * (gmax - gmin) + gmin
+		return {
+			"gamma_vehicle": float(gamma[0]),
+			"gamma_ped": float(gamma[1]),
+			"gamma_bike": float(gamma[2]),
+		}
+
+	def on_route_end(self, completed=False, collided=False):
+		self._prev_route_progress = [0.0 for _ in range(self.ego_vehicles_num)]
+		if self.rl_trainer is None or self.rl_eval_only:
+			return
+		self.rl_trainer.finish_episode(
+			completed=completed,
+			collided=collided,
+			cost_terminal_collision=self.rl_terminal_collision,
+		)
+
+	def on_route_start(self, route_path=None):
+		self._init_save_path()
+		self._prev_route_progress = [0.0 for _ in range(self.ego_vehicles_num)]
+		self.pre_raw_data_bank = {}
+		self.prev_control = {}
+		self.prev_surround_map = {}
 
 
 	def get_action_from_list_inter(self, car_data_raw, rsu_data_raw, step, timestamp):
@@ -910,6 +1161,48 @@ class PnP_infer():
 			steer, throttle, brake, meta_infos = self.controller[ego_i].run_step(
 				route_info
 			)
+
+			### CBF-QP filter
+			desired_speed = None
+			if isinstance(meta_infos, dict):
+				desired_speed = meta_infos.get('desired_speed', None)
+			if desired_speed is not None and getattr(self.cbf_filter, 'enabled', False):
+				ego_actor = CarlaDataProvider.get_hero_actor(hero_id=count_i)
+				world  = ego_actor.get_world()
+				actors = list(world.get_actors().filter("*vehicle*")) + list(world.get_actors().filter("*walker*"))
+				gammas = None
+				if self.use_rl and self.rl_trainer is not None:
+					obs_rl, _ = self._build_rl_obs(ego_actor, actors, desired_speed)
+					if self.rl_eval_only:
+						action, _, _ = self.rl_trainer.select_action(
+							obs_rl, deterministic=self.rl_deterministic_eval
+						)
+					else:
+						route_progress = car_data_raw[ego_i]["measurements"].get("route_progress", None)
+						reward = 0.0  # route completion handled at episode end
+						if route_progress is not None:
+							prev_prog = self._prev_route_progress[ego_i]
+							reward = max(0.0, float(route_progress) - float(prev_prog))
+							self._prev_route_progress[ego_i] = float(route_progress)
+						cost = self._compute_dense_rl_cost(ego_actor, actors)
+						action = self.rl_trainer.step(obs_rl, reward, cost, done=False)
+					gammas = self._action_to_gammas(action)
+
+				steer, desired_speed, cbf_info = self.cbf_filter.step(
+					ego_actor, actors, steer, desired_speed, gammas=gammas
+				)
+				throttle, brake = self.controller[ego_i].compute_throttle_brake(float(route_info['speed']), float(desired_speed))
+
+				if isinstance(meta_infos, dict) and 2 in meta_infos:
+					meta_infos[2] += f", cbf:{cbf_info.get('status','N/A')}"
+
+				route_info['cbf_info'] = cbf_info
+				route_info['desired_speed'] = desired_speed
+				if gammas is not None:
+					route_info['gammas'] = gammas
+			else:
+				route_info['cbf_info'] = {'status': 'disabled'}
+				route_info['desired_speed'] = desired_speed
 
 			if brake < 0.05:
 				brake = 0.0

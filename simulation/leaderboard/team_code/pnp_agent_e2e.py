@@ -18,6 +18,7 @@ from codriving.utils.torch_helper import \
 from common.torch_helper import load_checkpoint as load_planning_model_checkpoint
 
 from team_code.utils.carla_birdeye_view import BirdViewProducer, BirdViewCropType, PixelDimensions
+
 from team_code.pnp_infer_action_e2e import PnP_infer
 
 from team_code.planner_pnp import RoutePlanner
@@ -178,6 +179,26 @@ class PnP_Agent(autonomous_agent.AutonomousAgent):
             pixels_per_meter=5,
             crop_type=BirdViewCropType.FRONT_AND_REAR_AREA,
         )
+
+    def on_route_end(self, completed=False, collided=False):
+        if hasattr(self, "infer") and self.infer is not None:
+            self.infer.on_route_end(completed=completed, collided=collided)
+
+    def on_route_start(self, route_path=None):
+        self.initialized = False
+        self.first_generate_rsu = True
+        self.vehicle_num = 0
+        self.step = -1
+        try:
+            self.clean_rsu()
+        except Exception:
+            pass
+        self.rsu = []
+        if hasattr(self, "infer") and self.infer is not None:
+            try:
+                self.infer.on_route_start(route_path)
+            except Exception:
+                pass
 
     def _get_position(self, tick_data):
         # GPS coordinate!
@@ -354,6 +375,7 @@ class PnP_Agent(autonomous_agent.AutonomousAgent):
         # target waypoint produced by global planner
         pos = self._get_position({"gps": gps})
         next_wp, next_cmd = self._route_planner.run_step(pos, vehicle_num)
+        route_progress = self._route_planner.get_progress(vehicle_num)
         theta = compass + np.pi / 2
         R = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
         local_command_point = np.array([next_wp[0] - pos[0], next_wp[1] - pos[1]])
@@ -384,7 +406,8 @@ class PnP_Agent(autonomous_agent.AutonomousAgent):
             "speed": speed,
             "compass": compass,
             "command": next_cmd.value,
-            "target_point": local_command_point
+            "target_point": local_command_point,
+            "route_progress": route_progress,
         }
 
         # return pre-loaded sensor data

@@ -405,13 +405,17 @@ class PnP_infer():
 		self.save_path = None
 		if SAVE_PATH is not None:
 			now = datetime.datetime.now()
-			string = pathlib.Path(os.environ["ROUTES"]).stem + "_"
+			route_stem = pathlib.Path(os.environ.get("ROUTES", "route")).stem
+			pass_tag = os.environ.get("ROUTE_PASS")
+			prefix = "{}_".format(pass_tag) if pass_tag else ""
+			string = prefix + route_stem + "_"
 			string += "_".join(
 				map(
 					lambda x: "%02d" % x,
 					(now.month, now.day, now.hour, now.minute, now.second),
 				)
 			)
+			string += "_{:06d}".format(now.microsecond)
 
 			print(string)
 

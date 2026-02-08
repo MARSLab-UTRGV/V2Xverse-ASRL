@@ -330,6 +330,8 @@ class AgentWrapper(object):
                     _sensors_ego[i].destroy()
                     _sensors_ego[i] = None
             _sensors_ego = []
+        if hasattr(self._agent, "sensor_interface") and self._agent.sensor_interface is not None:
+            self._agent.sensor_interface.clear()
 
     def cleanup_single(self, vehicle_num = 0):
         """
