@@ -351,3 +351,106 @@ Interpretation:
 - Confirm `train_log.csv` header includes scaled columns (new trainer format).
 - Track both training metrics and evaluator metrics for conclusions.
 - Prefer long horizons (>=100k decision steps) before judging convergence.
+
+## 15) Paper evaluation pipeline (RL-CBF vs baselines)
+
+This repo now includes a reproducible evaluation + plotting pipeline for paper tables/figures.
+
+### 15.1 Run-matrix configs
+
+- Main benchmark matrix: `experiments/paper_eval_town05_main.yaml`
+  - protocol: `town05_all_scenarios_2.json`, `105 routes x 3 passes`
+  - methods: `rl_cbf_adaptive`, `fixed_cbf`, `pid_only`
+- Checkpoint-stage matrix: `experiments/paper_eval_ckpt_stages.yaml`
+  - protocol: `105 routes x 1 pass`
+  - methods are stage-tagged checkpoints (for sample-efficiency curves)
+
+### 15.2 Orchestrate evaluations
+
+Dry-run first (prints resolved commands, writes no CARLA outputs):
+
+```bash
+bash scripts/run_paper_eval.sh --config experiments/paper_eval_town05_main.yaml --dry-run
+```
+
+Run all methods:
+
+```bash
+bash scripts/run_paper_eval.sh --config experiments/paper_eval_town05_main.yaml
+```
+
+Run one method only:
+
+```bash
+bash scripts/run_paper_eval.sh --config experiments/paper_eval_town05_main.yaml --method rl_cbf_adaptive
+```
+
+Notes:
+
+- Results are stored deterministically under:
+  - `results/paper_eval/<experiment>/<method>/passXX/...`
+- A run manifest is written to:
+  - `results/paper_eval/<experiment>/run_manifest.json`
+- Each method gets an effective config snapshot:
+  - `results/paper_eval/<experiment>/<method>/manifest/agent_config_eval.yaml`
+
+### 15.3 Aggregate CSV tables
+
+From manifest (recommended):
+
+```bash
+python tools/paper/aggregate_eval.py \
+  --manifest results/paper_eval/town05_main/run_manifest.json \
+  --output-dir paper_outputs/main
+```
+
+Fallback from directory discovery:
+
+```bash
+python tools/paper/aggregate_eval.py \
+  --runs-root results/paper_eval/town05_main \
+  --output-dir paper_outputs/main
+```
+
+Generated tables:
+
+- `paper_outputs/main/route_metrics.csv`
+- `paper_outputs/main/method_summary.csv`
+- `paper_outputs/main/paired_deltas.csv`
+
+### 15.4 Generate figures
+
+```bash
+python tools/paper/plot_eval.py \
+  --summary-csv paper_outputs/main/method_summary.csv \
+  --paired-csv paper_outputs/main/paired_deltas.csv \
+  --output-dir paper_outputs/main/figures
+```
+
+Generated figures (PNG and PDF):
+
+- `overall_scores`
+- `overall_collisions_per_km`
+- `infraction_breakdown`
+- `paired_delta_hist_<baseline_method>`
+- `checkpoint_stage_curve` (only when stage-tagged methods are present)
+
+### 15.5 Metric conventions
+
+- Paired deltas are computed as:
+  - `delta = reference_method - compare_method`
+- Collision rate uses:
+  - `collisions_per_km = total_collisions / traveled_km`
+- 95% CI uses normal approximation:
+  - `1.96 * std / sqrt(n)`
+
+### 15.6 Deterministic RL evaluation mode
+
+In `rl_cbf_adaptive`, evaluation uses frozen policy inference:
+
+- `rl.enabled=true`
+- `rl.eval_only=true`
+- `rl.deterministic_eval=true`
+- `rl.resume_path=<trained_checkpoint>`
+
+This avoids optimizer/buffer updates during paper benchmarking.

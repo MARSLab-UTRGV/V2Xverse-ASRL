@@ -39,7 +39,7 @@ export ROUTE_ID_MAX=${9:-331}
 export REUSE_AGENT=${10:-1}
 export ROUTES=${LEADERBOARD_ROOT}/data/evaluation_routes/town05_short_r${ROUTE_ID_START}.xml
 # verify the evaluation route, including start point and end point.
-export SCENARIOS=${LEADERBOARD_ROOT}/data/scenarios/town05_all_scenarios_complete.json
+export SCENARIOS=${LEADERBOARD_ROOT}/data/scenarios/town05_all_scenarios_2.json
 export SCENARIOS_PARAMETER=${LEADERBOARD_ROOT}/leaderboard/scenarios/scenario_parameter$6.yaml
 
 RUN_ID_RAW=${4:-1}

@@ -30,6 +30,7 @@ RSU:
 simulation:
     ego_num: 1                     # number of communicating drivable ego vehicles
     skip_frames: 4                 # frame gap before a new driving control signal is generated
+    save_step_outputs: true        # save per-step dashboard jpg/json (disable for faster training)
 
 perception:
     core_method: 'collaborative_perception'
