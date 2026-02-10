@@ -6,6 +6,8 @@ CONFIG_PATH="${REPO_ROOT}/experiments/paper_eval_town05_main.yaml"
 DRY_RUN=0
 FORCE=0
 METHOD_FILTER=""
+START_PASS=1
+CONTINUE_MODE=0
 
 usage() {
   cat <<'USAGE'
@@ -14,6 +16,8 @@ Usage: scripts/run_paper_eval.sh [options]
 Options:
   --config PATH      Run-matrix config yaml (default: experiments/paper_eval_town05_main.yaml)
   --method NAME      Run only one method name from config
+  --start-pass N     Start from pass N (default: 1)
+  --continue         Continue mode: skip finished passes and resume unfinished pass checkpoints
   --dry-run          Print resolved commands and manifests, do not execute evaluator
   --force            Overwrite existing pass results for this experiment/method
   -h, --help         Show this help
@@ -29,6 +33,14 @@ while [[ $# -gt 0 ]]; do
     --method)
       METHOD_FILTER="$2"
       shift 2
+      ;;
+    --start-pass)
+      START_PASS="$2"
+      shift 2
+      ;;
+    --continue)
+      CONTINUE_MODE=1
+      shift
       ;;
     --dry-run)
       DRY_RUN=1
@@ -55,7 +67,7 @@ if [[ ! -f "$CONFIG_PATH" ]]; then
   exit 1
 fi
 
-python3 - "$REPO_ROOT" "$CONFIG_PATH" "$METHOD_FILTER" "$DRY_RUN" "$FORCE" <<'PY'
+python3 - "$REPO_ROOT" "$CONFIG_PATH" "$METHOD_FILTER" "$DRY_RUN" "$FORCE" "$START_PASS" "$CONTINUE_MODE" <<'PY'
 import copy
 import datetime
 import json
@@ -70,9 +82,13 @@ except ImportError as exc:
     raise SystemExit("Missing dependency: pyyaml (import yaml failed)") from exc
 
 
-repo_root, config_path, method_filter, dry_run_s, force_s = sys.argv[1:]
+repo_root, config_path, method_filter, dry_run_s, force_s, start_pass_s, continue_mode_s = sys.argv[1:]
 dry_run = dry_run_s == "1"
 force = force_s == "1"
+continue_mode = continue_mode_s == "1"
+start_pass = int(start_pass_s)
+if start_pass <= 0:
+    raise ValueError("--start-pass must be >= 1")
 
 
 def _abspath(path):
@@ -93,6 +109,15 @@ def deep_update(dst, src):
             deep_update(dst[key], value)
         else:
             dst[key] = copy.deepcopy(value)
+
+
+def _read_entry_status(results_json_path):
+    try:
+        with open(results_json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return str(data.get("entry_status", "")).strip()
+    except Exception:
+        return ""
 
 
 with open(config_path, "r", encoding="utf-8") as f:
@@ -125,6 +150,8 @@ for key in required_runtime_keys:
 route_passes = int(runtime_cfg["route_passes"])
 if route_passes <= 0:
     raise ValueError("runtime.route_passes must be >= 1")
+if start_pass > route_passes:
+    raise ValueError("--start-pass={} is greater than runtime.route_passes={}".format(start_pass, route_passes))
 
 exp_root = _abspath(os.path.join(output_root_rel, exp_name))
 os.makedirs(exp_root, exist_ok=True)
@@ -135,6 +162,8 @@ manifest = {
     "config_path": os.path.abspath(config_path),
     "reference_method": reference_method,
     "runtime": runtime_cfg,
+    "start_pass": start_pass,
+    "continue_mode": continue_mode,
     "methods": [],
 }
 
@@ -199,7 +228,7 @@ for method in methods_cfg:
         "pass_runs": [],
     }
 
-    for pass_idx in range(1, route_passes + 1):
+    for pass_idx in range(start_pass, route_passes + 1):
         pass_tag = "pass{:02d}".format(pass_idx)
         run_root = os.path.join(method_root, pass_tag)
         run_eval_root = os.path.join(run_root, "eval")
@@ -213,8 +242,29 @@ for method in methods_cfg:
 
         checkpoint_endpoint = os.path.join(run_eval_root, "results.json")
         method_results = os.path.join(run_eval_root, "ego_vehicle_0", "results.json")
+        resume_flag = int(runtime_cfg["resume"])
+        existing_entry_status = ""
 
-        if os.path.exists(method_results) and not force:
+        if continue_mode:
+            if os.path.exists(method_results):
+                existing_entry_status = _read_entry_status(method_results)
+                if existing_entry_status == "Finished" and not force:
+                    print("[paper-eval] {} {} already finished, skipping.".format(method_name, pass_tag))
+                    method_entry["pass_runs"].append(
+                        {
+                            "pass_index": pass_idx,
+                            "run_root": run_root,
+                            "checkpoint_endpoint": checkpoint_endpoint,
+                            "results_json": method_results,
+                            "status": "skipped_finished",
+                        }
+                    )
+                    continue
+                resume_flag = 1
+            elif os.path.exists(checkpoint_endpoint):
+                resume_flag = 1
+
+        if os.path.exists(method_results) and not force and not continue_mode:
             raise FileExistsError(
                 "Existing results found (use --force to overwrite): {}".format(method_results)
             )
@@ -245,7 +295,7 @@ for method in methods_cfg:
             "--agent={}".format(runtime_cfg["team_agent"]),
             "--agent-config={}".format(agent_cfg_out),
             "--track={}".format(runtime_cfg["track"]),
-            "--resume={}".format(runtime_cfg["resume"]),
+            "--resume={}".format(resume_flag),
             "--checkpoint={}".format(checkpoint_endpoint),
             "--ego-num=1",
             "--skip_existed={}".format(runtime_cfg["skip_existed"]),
@@ -283,6 +333,8 @@ for method in methods_cfg:
             "run_root": run_root,
             "checkpoint_endpoint": checkpoint_endpoint,
             "results_json": method_results,
+            "resume": resume_flag,
+            "existing_entry_status": existing_entry_status,
             "command": cmd,
         }
         method_entry["pass_runs"].append(pass_entry)

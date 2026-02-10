@@ -172,6 +172,7 @@ class LeaderboardEvaluator(object):
         self.ego_vehicles_num = args.ego_num
         self.reuse_agent = bool(getattr(args, "reuse_agent", False))
         self._best_metrics = None
+        self._received_sigint = False
 
     def _get_rl_trainer(self):
         if not getattr(self, "agent_instance", None):
@@ -259,6 +260,7 @@ class LeaderboardEvaluator(object):
         """
         Terminate scenario ticking when receiving a signal interrupt
         """
+        self._received_sigint = True
         if self._agent_watchdog and not self._agent_watchdog.get_status():
             raise RuntimeError("Timeout: Agent took too long to setup")
         elif self.manager:
@@ -525,7 +527,7 @@ class LeaderboardEvaluator(object):
             crash_message = "Agent couldn't be set up"
             # self._register_statistics(config,  args.ego_num, args.checkpoint, entry_status, crash_message)
             self._cleanup()
-            return
+            return True
 
         # Load the world and the scenario
         print("\033[1m> Loading the world\033[0m")    
@@ -610,8 +612,14 @@ class LeaderboardEvaluator(object):
         try:
             print("\033[1m> Stopping the route\033[0m")
             self.manager.stop_scenario()
-            #GXK111
-            self._register_statistics(config,  args.ego_num, args.checkpoint, entry_status, crash_message)
+
+            # If user interrupted with Ctrl+C, keep checkpoint cursor at this route
+            # by not committing the interrupted route statistics/progress.
+            if self._received_sigint:
+                print("\033[93m> Interrupted by user; route will be resumed from this route on next run.\033[0m")
+            else:
+                #GXK111
+                self._register_statistics(config,  args.ego_num, args.checkpoint, entry_status, crash_message)
 
             if args.record:
                 self.client.stop_recorder()
@@ -628,6 +636,9 @@ class LeaderboardEvaluator(object):
                 zombie.destroy()
                 zombie = None            
 
+            if self._received_sigint:
+                return False
+
         except Exception as e:
             print("\n\033[91mFailed to stop the scenario, the statistics might be empty:")
             print("> {}\033[0m\n".format(e))
@@ -635,6 +646,8 @@ class LeaderboardEvaluator(object):
             traceback.print_exc(file=open(log_file_dir,'a'))
 
             crash_message = "Simulation crashed"
+
+        return True
 
         # if crash_message == "Simulation crashed":
         #     sys.exit(-1)
@@ -672,7 +685,11 @@ class LeaderboardEvaluator(object):
                 torch.manual_seed(int(args.carlaProviderSeed))
                 torch.cuda.manual_seed_all(int(args.carlaProviderSeed))
                 # run
-                self._load_and_run_scenario(args, config)
+                route_committed = self._load_and_run_scenario(args, config)
+                if self._received_sigint:
+                    break
+                if route_committed is False:
+                    continue
                 found_routes += 1
                 self._maybe_save_best(found_routes, args)
 
@@ -685,6 +702,11 @@ class LeaderboardEvaluator(object):
 
             except Exception as e:
                 print('route error:',e)
+
+        if self._received_sigint:
+            self._flush_rl_pending()
+            print("\033[93m> Interrupted by user. Checkpoint preserved for resume.\033[0m")
+            return
 
         self._flush_rl_pending()
 
@@ -707,23 +729,129 @@ class LeaderboardEvaluator(object):
         """
         Run sequential routes by iterating route IDs and skipping missing files.
         """
+        def _stats_path(ego_idx, ensure_parent=False):
+            folder_path = os.path.join(
+                os.path.dirname(args.checkpoint), "ego_vehicle_{}".format(ego_idx)
+            )
+            if ensure_parent and not os.path.exists(folder_path):
+                os.mkdir(folder_path)
+            return os.path.join(folder_path, os.path.basename(args.checkpoint))
+
+        def _scan_next_route_id(completed_in_pass, route_id_start, route_id_max):
+            route_id = route_id_start
+            found = 0
+            while found < completed_in_pass and route_id <= route_id_max:
+                route_path = os.path.join(
+                    args.routes_dir, args.routes_pattern.format(route_id)
+                )
+                route_id += 1
+                if not os.path.exists(route_path):
+                    continue
+                found += 1
+            return route_id, found
+
+        def _infer_cursor_from_found(found_routes_total):
+            total_target = int(num_routes_target * passes)
+            found_local = max(0, min(int(found_routes_total), total_target))
+            pass_idx_local = min(found_local // max(1, num_routes_target), passes)
+            if pass_idx_local < passes:
+                pass_found_target = found_local - (pass_idx_local * num_routes_target)
+                next_route_id_local, matched = _scan_next_route_id(
+                    pass_found_target, route_id_start, route_id_max
+                )
+                # If route-id layout changed between runs, clamp to what is actually matchable.
+                if matched != pass_found_target:
+                    found_local = pass_idx_local * num_routes_target + matched
+                return pass_idx_local, matched, next_route_id_local, found_local
+            return pass_idx_local, 0, route_id_start, found_local
+
+        def _save_route_id_loop_state(
+            found_routes_total, pass_idx, pass_found, next_route_id, passes_total, num_routes_target, completed=False
+        ):
+            loop_state = {
+                "version": 1,
+                "pass_idx": int(pass_idx),
+                "pass_found": int(pass_found),
+                "next_route_id": int(next_route_id),
+                "found_routes": int(found_routes_total),
+                "passes_total": int(passes_total),
+                "num_routes_target": int(num_routes_target),
+                "route_id_start": int(args.route_id_start),
+                "route_id_max": int(args.route_id_max),
+                "completed": bool(completed),
+            }
+            progress_total = int(num_routes_target * passes_total)
+
+            for ego_idx in range(self.ego_vehicles_num):
+                path_tmp = _stats_path(ego_idx, ensure_parent=True)
+                data = fetch_dict(path_tmp)
+                if not data:
+                    data = create_default_json_msg()
+                data["_checkpoint"]["progress"] = [int(found_routes_total), progress_total]
+                data["_checkpoint"]["route_id_loop_state"] = loop_state
+                save_dict(path_tmp, data)
+
         found_routes = 0
-        passes = int(args.route_passes) + 1
+        passes = max(1, int(args.route_passes))
+        num_routes_target = int(args.num_routes)
+        route_id_start = int(args.route_id_start)
+        route_id_max = int(args.route_id_max)
+
+        start_pass_idx = 0
+        start_pass_found = 0
+        start_route_id = route_id_start
 
         # initialize stats
         if args.resume:
+            resume_data = fetch_dict(_stats_path(0, ensure_parent=False))
+            record_count = 0
+            if resume_data and resume_data.get("_checkpoint", {}).get("records"):
+                record_count = len(resume_data["_checkpoint"]["records"])
+                found_routes = record_count
             for i in range(self.ego_vehicles_num):
-                self.statistics_manager[i].resume(args.checkpoint)
+                self.statistics_manager[i].resume(_stats_path(i, ensure_parent=False))
+
+            loop_state = None
+            if resume_data:
+                loop_state = resume_data.get("_checkpoint", {}).get("route_id_loop_state")
+
+            if isinstance(loop_state, dict):
+                state_found = int(loop_state.get("found_routes", record_count))
+                state_passes = int(loop_state.get("passes_total", passes))
+                state_num_routes = int(loop_state.get("num_routes_target", num_routes_target))
+
+                state_compatible = (
+                    state_passes == passes and state_num_routes == num_routes_target
+                )
+                state_consistent = (state_found == record_count)
+
+                if state_compatible and state_consistent:
+                    start_pass_idx = max(0, min(int(loop_state.get("pass_idx", 0)), passes))
+                    start_pass_found = max(0, int(loop_state.get("pass_found", 0)))
+                    start_route_id = int(loop_state.get("next_route_id", route_id_start))
+                    found_routes = record_count
+                else:
+                    # Rebuild cursor from recorded routes to avoid replay/duplication from stale loop_state.
+                    start_pass_idx, start_pass_found, start_route_id, found_routes = _infer_cursor_from_found(record_count)
+            elif record_count > 0:
+                # Backward-compatible inference when old checkpoints do not have route_id_loop_state.
+                start_pass_idx, start_pass_found, start_route_id, found_routes = _infer_cursor_from_found(record_count)
         else:
+            self.statistics_manager[0].clear_record(args.checkpoint)
             for i in range(self.ego_vehicles_num):
-                self.statistics_manager[i].clear_record(args.checkpoint)
+                self.statistics_manager[i].clear_record(_stats_path(i, ensure_parent=True))
 
         print("Start Running (route-id loop)!")
-        for pass_idx in range(passes):
-            pass_found = 0
-            route_id = int(args.route_id_start)
+        interrupted = False
+        for pass_idx in range(start_pass_idx, passes):
+            if pass_idx == start_pass_idx:
+                pass_found = start_pass_found
+                route_id = start_route_id
+            else:
+                pass_found = 0
+                route_id = route_id_start
             os.environ["ROUTE_PASS"] = "pass{:02d}".format(pass_idx + 1)
-            while pass_found < int(args.num_routes) and route_id <= int(args.route_id_max):
+            while pass_found < num_routes_target and route_id <= route_id_max:
                 route_path = os.path.join(
                     args.routes_dir, args.routes_pattern.format(route_id)
                 )
@@ -735,6 +863,7 @@ class LeaderboardEvaluator(object):
                 os.environ["ROUTES"] = route_path
                 # Force per-route repetitions to 1; full-pass repeats handled externally.
                 route_indexer = RouteIndexer(args.routes, args.scenarios, 1)
+                route_committed = True
 
                 while route_indexer.peek():
                     config = route_indexer.next()
@@ -746,17 +875,54 @@ class LeaderboardEvaluator(object):
                     torch.manual_seed(int(args.carlaProviderSeed))
                     torch.cuda.manual_seed_all(int(args.carlaProviderSeed))
 
-                    self._load_and_run_scenario(args, config)
+                    route_committed = self._load_and_run_scenario(args, config)
+                    if self._received_sigint:
+                        interrupted = True
+                        break
+
+                if interrupted:
+                    break
+                if route_committed is False:
+                    continue
 
                 pass_found += 1
                 found_routes += 1
                 self._maybe_save_best(found_routes, args)
-            if pass_found < int(args.num_routes):
+                _save_route_id_loop_state(
+                    found_routes_total=found_routes,
+                    pass_idx=pass_idx,
+                    pass_found=pass_found,
+                    next_route_id=route_id,
+                    passes_total=passes,
+                    num_routes_target=num_routes_target,
+                    completed=False,
+                )
+
+            if interrupted:
+                break
+
+            if pass_found >= num_routes_target:
+                _save_route_id_loop_state(
+                    found_routes_total=found_routes,
+                    pass_idx=pass_idx + 1,
+                    pass_found=0,
+                    next_route_id=route_id_start,
+                    passes_total=passes,
+                    num_routes_target=num_routes_target,
+                    completed=False,
+                )
+
+            if pass_found < num_routes_target:
                 print(
                     "Route-id loop stopped at max id {} (pass {}/{}): ran {} of {} routes.".format(
                         args.route_id_max, pass_idx + 1, passes, pass_found, args.num_routes
                     )
                 )
+
+        if interrupted or self._received_sigint:
+            self._flush_rl_pending()
+            print("\033[93m> Interrupted by user. Checkpoint preserved for resume.\033[0m")
+            return
 
         self._flush_rl_pending()
 
@@ -774,6 +940,18 @@ class LeaderboardEvaluator(object):
                 if not data:
                     data = create_default_json_msg()
                 data["_checkpoint"]["progress"] = [found_routes, found_routes]
+                data["_checkpoint"]["route_id_loop_state"] = {
+                    "version": 1,
+                    "pass_idx": passes,
+                    "pass_found": 0,
+                    "next_route_id": route_id_start,
+                    "found_routes": found_routes,
+                    "passes_total": passes,
+                    "num_routes_target": num_routes_target,
+                    "route_id_start": route_id_start,
+                    "route_id_max": route_id_max,
+                    "completed": True,
+                }
                 save_dict(path_tmp, data)
 
             for i in range(self.ego_vehicles_num):
@@ -822,7 +1000,7 @@ def main():
     parser.add_argument('--route-passes',
                         type=int,
                         default=0,
-                        help='Full-pass repeats over the route set (0 = single pass).')
+                        help='Full-pass repeats over the route set (0 or 1 = single pass).')
     parser.add_argument('--routes-dir',
                         default='simulation/leaderboard/data/evaluation_routes',
                         help='Directory containing town05_short_r{ID}.xml files.')

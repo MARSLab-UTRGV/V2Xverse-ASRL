@@ -64,6 +64,7 @@ Each matrix YAML has:
   - `reference_method`: used for paired deltas (`reference - compare`)
 - `runtime`:
   - evaluator/network parameters, route protocol, scenario file, seeds
+  - `route_passes` is the total number of pass folders to run (`pass01..passNN`)
 - `methods`: list of methods
   - `name`
   - `base_agent_config`
@@ -151,7 +152,36 @@ CUDA_VISIBLE_DEVICES=0 bash scripts/run_paper_eval.sh --config experiments/paper
 
 By default, existing pass results are protected and runner aborts if they already exist.
 
-### 6.6 Checkpoint-stage curve evaluation
+### 6.6 Start from a specific pass (no resume)
+
+```bash
+CUDA_VISIBLE_DEVICES=0 bash scripts/run_paper_eval.sh \
+  --config experiments/paper_eval_town05_main.yaml \
+  --start-pass 2
+```
+
+Use this when `pass02` does not exist yet and you want to skip `pass01`.
+
+### 6.7 Continue an interrupted pass
+
+```bash
+CUDA_VISIBLE_DEVICES=0 bash scripts/run_paper_eval.sh \
+  --config experiments/paper_eval_town05_main.yaml \
+  --start-pass 2 \
+  --continue
+```
+
+Behavior in continue mode:
+
+- Finished passes are skipped automatically.
+- Unfinished pass checkpoints are resumed.
+- In route-id loop mode, evaluator resumes from the next route in the same pass
+  (not from route 1), then continues until `num_routes` is reached.
+- This resumes per-pass eval progress checkpoint (`passXX/eval/results.json`).
+  It is separate from RL policy checkpoint paths (`rl.resume_path`) used by
+  eval-only methods.
+
+### 6.8 Checkpoint-stage curve evaluation
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash scripts/run_paper_eval.sh --config experiments/paper_eval_ckpt_stages.yaml
@@ -223,6 +253,7 @@ python3 tools/paper/plot_eval.py \
    - Ensure CARLA world port matches `runtime.port` in matrix YAML.
 3. Existing outputs
    - Use `--force` if you intentionally want to overwrite previous pass outputs.
+   - Use `--continue` if you want to resume instead of overwrite.
 4. Missing Python deps
    - Install `pyyaml` and `matplotlib` in the active env.
 
@@ -238,12 +269,18 @@ bash scripts/run_paper_eval.sh --config experiments/paper_eval_town05_main.yaml 
 # 3) Run benchmark
 CUDA_VISIBLE_DEVICES=0 bash scripts/run_paper_eval.sh --config experiments/paper_eval_town05_main.yaml
 
-# 4) Aggregate
+# 4) Resume interrupted run from pass02
+CUDA_VISIBLE_DEVICES=0 bash scripts/run_paper_eval.sh \
+  --config experiments/paper_eval_town05_main.yaml \
+  --start-pass 2 \
+  --continue
+
+# 5) Aggregate
 python3 tools/paper/aggregate_eval.py \
   --manifest results/paper_eval/town05_main/run_manifest.json \
   --output-dir paper_outputs/main
 
-# 5) Plot
+# 6) Plot
 python3 tools/paper/plot_eval.py \
   --summary-csv paper_outputs/main/method_summary.csv \
   --paired-csv paper_outputs/main/paired_deltas.csv \

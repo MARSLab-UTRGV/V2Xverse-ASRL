@@ -604,6 +604,9 @@ class PnP_infer():
 		if self.use_rl:
 			rl_cfg = rl_config
 			resume_path = rl_cfg.get("resume_path", None)
+			env_resume_path = os.environ.get("RL_RESUME_PATH", "").strip()
+			if env_resume_path:
+				resume_path = env_resume_path
 			if self.rl_eval_only:
 				if not resume_path or not os.path.exists(resume_path):
 					raise ValueError(

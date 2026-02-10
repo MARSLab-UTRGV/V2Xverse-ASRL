@@ -261,6 +261,51 @@ CUDA_VISIBLE_DEVICES=0 bash scripts/train_rl_e2e.sh 24 40002 codriving 7 rl_cbf 
 8. `route_passes`
 9. `route_id_max`
 10. `reuse_agent` (`1` reuse, `0` recreate per route)
+11. `resume_mode` (`1` resume route progress + RL state, `0` fresh run)
+12. `rl_resume_ckpt` (optional path override, used when `resume_mode=1`)
+
+`route_passes` semantics:
+
+- Evaluator treats this as exact pass count.
+- `0` or `1` means a single pass.
+- `2` means exactly two passes.
+
+Resume behavior for route-id loop:
+
+- With `resume_mode=1` (arg 11), evaluator resumes from the same run checkpoint
+  (`results/rl_runs/runXXX/eval/results.json`) and continues from the next
+  route in the same pass.
+- It runs only the remaining routes in that pass until `num_routes` is reached.
+- If interruption happened mid-route, that route restarts from route start.
+
+RL checkpoint source when resuming:
+
+- By default, `resume_mode=1` loads:
+  - `results/rl_runs/runXXX/rl/checkpoints/ckpt_latest.pt`
+- You can override it with arg 12 (`rl_resume_ckpt`).
+- This override is applied via env `RL_RESUME_PATH` and takes priority over
+  YAML `rl.resume_path`.
+
+Examples:
+
+Fresh run:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 bash scripts/train_rl_e2e.sh 24 40002 codriving 7 rl_cbf _2 105 1 331 1 0
+```
+
+Resume interrupted run (same `run_id`):
+
+```bash
+CUDA_VISIBLE_DEVICES=0 bash scripts/train_rl_e2e.sh 24 40002 codriving 7 rl_cbf _2 105 1 331 1 1
+```
+
+Resume with explicit RL checkpoint:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 bash scripts/train_rl_e2e.sh 24 40002 codriving 7 rl_cbf _2 105 1 331 1 1 \
+  results/rl_runs/run007/rl/checkpoints/ckpt_update_50.pt
+```
 
 For frozen-policy evaluation runs, keep the same launcher but set in YAML:
 
@@ -383,6 +428,18 @@ Run one method only:
 
 ```bash
 bash scripts/run_paper_eval.sh --config experiments/paper_eval_town05_main.yaml --method rl_cbf_adaptive
+```
+
+Start from pass 2 (skip pass 1):
+
+```bash
+bash scripts/run_paper_eval.sh --config experiments/paper_eval_town05_main.yaml --start-pass 2
+```
+
+Continue interrupted pass 2:
+
+```bash
+bash scripts/run_paper_eval.sh --config experiments/paper_eval_town05_main.yaml --start-pass 2 --continue
 ```
 
 Notes:

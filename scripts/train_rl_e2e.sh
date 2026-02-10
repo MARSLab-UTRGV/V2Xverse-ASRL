@@ -10,6 +10,8 @@
 # $8, repeat passes (optional; full-pass repeats)
 # $9, max route id (optional; stop a pass after this id)
 # $10, reuse agent across routes (optional; 1 = reuse)
+# $11, resume mode (optional; 1 = resume route progress + RL state, 0 = fresh)
+# $12, RL checkpoint path override (optional; defaults to <run>/rl/checkpoints/ckpt_latest.pt when resuming)
 
 export CARLA_ROOT=external_paths/carla_root
 export LEADERBOARD_ROOT=simulation/leaderboard
@@ -61,9 +63,31 @@ export TEAM_AGENT=simulation/leaderboard/team_code/pnp_agent_e2e.py
 export TEAM_CONFIG=simulation/leaderboard/team_code/agent_config/pnp_config_$5.yaml
 # model config file!
 
-export RESUME=0
+export RESUME=${11:-0}
 export EGO_NUM=1
 export SKIP_EXISTED=0
+
+if [[ "${RESUME}" == "1" ]]; then
+  RL_RESUME_PATH_ARG=${12:-}
+  if [[ -n "${RL_RESUME_PATH_ARG}" ]]; then
+    export RL_RESUME_PATH="${RL_RESUME_PATH_ARG}"
+  else
+    export RL_RESUME_PATH="${RL_LOG_DIR}/checkpoints/ckpt_latest.pt"
+  fi
+
+  if [[ ! -f "${CHECKPOINT_ENDPOINT}" ]]; then
+    echo "Resume requested, but evaluator checkpoint not found: ${CHECKPOINT_ENDPOINT}" >&2
+    echo "Use the same run id as the interrupted run." >&2
+    exit 1
+  fi
+  if [[ ! -f "${RL_RESUME_PATH}" ]]; then
+    echo "Resume requested, but RL checkpoint not found: ${RL_RESUME_PATH}" >&2
+    echo "Pass arg12 with an explicit RL checkpoint path if needed." >&2
+    exit 1
+  fi
+else
+  unset RL_RESUME_PATH || true
+fi
 
 mkdir -p "${SAVE_PATH}"
 mkdir -p "${RESULT_ROOT}/eval"

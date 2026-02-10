@@ -1,7 +1,7 @@
 experiment:
-  name: town05_main_test
+  name: town05_main_test02
   output_root: results/paper_eval
-  reference_method: rl_cbf_adaptive
+  reference_method: fixed_cbf
 
 runtime:
   host: localhost
@@ -15,8 +15,8 @@ runtime:
   carla_seed: 2000
   traffic_seed: 2000
   route_id_start: 0
-  num_routes: 3
-  route_passes: 1
+  num_routes: 2
+  route_passes: 2
   route_id_max: 331
   routes_dir: simulation/leaderboard/data/evaluation_routes
   routes_pattern: town05_short_r{}.xml
