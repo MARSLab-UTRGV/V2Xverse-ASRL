@@ -294,18 +294,33 @@ Fresh run:
 CUDA_VISIBLE_DEVICES=0 bash scripts/train_rl_e2e.sh 24 40002 codriving 7 rl_cbf _2 105 1 331 1 0
 ```
 
-Resume interrupted run (same `run_id`):
+Continue interrupted run (same `run_id`):
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash scripts/train_rl_e2e.sh 24 40002 codriving 7 rl_cbf _2 105 1 331 1 1
 ```
 
-Resume with explicit RL checkpoint:
+Continue with explicit RL checkpoint:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash scripts/train_rl_e2e.sh 24 40002 codriving 7 rl_cbf _2 105 1 331 1 1 \
   results/rl_runs/run007/rl/checkpoints/ckpt_update_50.pt
 ```
+
+Continue and extend total passes later (example: previously `route_passes=1`, now continue to `3`):
+
+```bash
+CUDA_VISIBLE_DEVICES=0 bash scripts/train_rl_e2e.sh 24 40002 codriving 7 rl_cbf _2 105 3 331 1 1
+```
+
+Operational notes:
+
+- There is no `--force` flag in `train_rl_e2e.sh`.
+- For clean fresh experiments, use a new `run_id` instead of reusing an old run with `resume_mode=0`.
+- `resume_mode=1` needs both checkpoints from the same run root:
+  - evaluator progress: `results/rl_runs/runXXX/eval/results.json`
+  - RL policy state: `results/rl_runs/runXXX/rl/checkpoints/ckpt_latest.pt` (or arg12 override)
+- If interruption happened mid-route, resume restarts that route from route start.
 
 For frozen-policy evaluation runs, keep the same launcher but set in YAML:
 

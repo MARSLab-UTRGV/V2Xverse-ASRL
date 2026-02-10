@@ -144,25 +144,17 @@ CUDA_VISIBLE_DEVICES=0 bash scripts/run_paper_eval.sh --config experiments/paper
 CUDA_VISIBLE_DEVICES=0 bash scripts/run_paper_eval.sh --config experiments/paper_eval_town05_main.yaml --method pid_only
 ```
 
-### 6.5 Overwrite existing pass results
+### 6.5 Continue an interrupted run (recommended)
 
-```bash
-CUDA_VISIBLE_DEVICES=0 bash scripts/run_paper_eval.sh --config experiments/paper_eval_town05_main.yaml --force
-```
-
-By default, existing pass results are protected and runner aborts if they already exist.
-
-### 6.6 Start from a specific pass (no resume)
+Single-pass config (`runtime.route_passes: 1`):
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash scripts/run_paper_eval.sh \
   --config experiments/paper_eval_town05_main.yaml \
-  --start-pass 2
+  --continue
 ```
 
-Use this when `pass02` does not exist yet and you want to skip `pass01`.
-
-### 6.7 Continue an interrupted pass
+Resume from pass 2 in multi-pass config:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash scripts/run_paper_eval.sh \
@@ -177,15 +169,52 @@ Behavior in continue mode:
 - Unfinished pass checkpoints are resumed.
 - In route-id loop mode, evaluator resumes from the next route in the same pass
   (not from route 1), then continues until `num_routes` is reached.
+- If interruption happened mid-route, that route is replayed from route start on resume.
 - This resumes per-pass eval progress checkpoint (`passXX/eval/results.json`).
   It is separate from RL policy checkpoint paths (`rl.resume_path`) used by
   eval-only methods.
+
+### 6.6 Overwrite existing pass results (force rerun)
+
+```bash
+CUDA_VISIBLE_DEVICES=0 bash scripts/run_paper_eval.sh \
+  --config experiments/paper_eval_town05_main.yaml \
+  --method fixed_cbf \
+  --start-pass 2 \
+  --force
+```
+
+Force behavior:
+
+- Existing pass folder is deleted before rerun (`.../<method>/passXX`).
+- Resume is disabled for that pass (`--resume=0` internally).
+- `--force --continue` is valid, but force wins (fresh rerun, not resume).
+- With `--dry-run`, it prints "would clear existing pass directory" and does not delete.
+
+### 6.7 Start from a specific pass (without resume)
+
+```bash
+CUDA_VISIBLE_DEVICES=0 bash scripts/run_paper_eval.sh \
+  --config experiments/paper_eval_town05_main.yaml \
+  --start-pass 2
+```
+
+Use this when `pass02` does not exist yet and you want to skip `pass01`.
 
 ### 6.8 Checkpoint-stage curve evaluation
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash scripts/run_paper_eval.sh --config experiments/paper_eval_ckpt_stages.yaml
 ```
+
+### 6.9 Quick command matrix
+
+| Situation | Command | Result |
+|---|---|---|
+| Continue same interrupted pass | `... --continue` | Resumes from saved route progress in that pass. |
+| Continue from pass 2 onward | `... --start-pass 2 --continue` | Skips pass 1 and resumes/runs pass 2..N. |
+| Rerun pass 2 from scratch | `... --start-pass 2 --force` | Deletes pass 2 output and reruns cleanly. |
+| Replace old pass data while keeping `--continue` in command | `... --start-pass 2 --force --continue` | Same as force rerun; no resume for that pass. |
 
 ## 7) Aggregate Tables
 

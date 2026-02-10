@@ -235,6 +235,14 @@ for method in methods_cfg:
         run_images_root = os.path.join(run_root, "images")
         run_rl_root = os.path.join(run_root, "rl")
         run_manifest_root = os.path.join(run_root, "manifest")
+
+        if force and os.path.isdir(run_root):
+            if not dry_run:
+                print("[paper-eval] {} {} force enabled, clearing existing pass directory.".format(method_name, pass_tag))
+                shutil.rmtree(run_root)
+            else:
+                print("[paper-eval] {} {} force enabled, would clear existing pass directory.".format(method_name, pass_tag))
+
         os.makedirs(run_eval_root, exist_ok=True)
         os.makedirs(run_images_root, exist_ok=True)
         os.makedirs(run_rl_root, exist_ok=True)
@@ -245,7 +253,9 @@ for method in methods_cfg:
         resume_flag = int(runtime_cfg["resume"])
         existing_entry_status = ""
 
-        if continue_mode:
+        if force:
+            resume_flag = 0
+        elif continue_mode:
             if os.path.exists(method_results):
                 existing_entry_status = _read_entry_status(method_results)
                 if existing_entry_status == "Finished" and not force:

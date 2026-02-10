@@ -527,7 +527,7 @@ class LeaderboardEvaluator(object):
             crash_message = "Agent couldn't be set up"
             # self._register_statistics(config,  args.ego_num, args.checkpoint, entry_status, crash_message)
             self._cleanup()
-            return True
+            return False
 
         # Load the world and the scenario
         print("\033[1m> Loading the world\033[0m")    
@@ -819,9 +819,14 @@ class LeaderboardEvaluator(object):
                 state_found = int(loop_state.get("found_routes", record_count))
                 state_passes = int(loop_state.get("passes_total", passes))
                 state_num_routes = int(loop_state.get("num_routes_target", num_routes_target))
+                state_route_id_start = int(loop_state.get("route_id_start", route_id_start))
+                state_route_id_max = int(loop_state.get("route_id_max", route_id_max))
 
                 state_compatible = (
-                    state_passes == passes and state_num_routes == num_routes_target
+                    state_passes == passes
+                    and state_num_routes == num_routes_target
+                    and state_route_id_start == route_id_start
+                    and state_route_id_max == route_id_max
                 )
                 state_consistent = (state_found == record_count)
 
