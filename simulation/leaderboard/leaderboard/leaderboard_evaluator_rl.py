@@ -277,6 +277,34 @@ class LeaderboardEvaluator(object):
         if hasattr(self, 'world') and self.world:
             del self.world
 
+    @staticmethod
+    def _safe_destroy_actor_handle(actor, stop_first=False):
+        """
+        Best-effort actor destroy for idempotent cleanup.
+        """
+        if actor is None:
+            return False
+
+        if stop_first and hasattr(actor, "stop"):
+            try:
+                actor.stop()
+            except Exception:
+                pass
+
+        try:
+            if hasattr(actor, "is_alive") and not actor.is_alive:
+                return False
+        except Exception:
+            return False
+
+        try:
+            actor.destroy()
+            return True
+        except RuntimeError:
+            return False
+        except Exception:
+            return False
+
     def _cleanup(self):
         """
         Remove and destroy all actors
@@ -299,7 +327,7 @@ class LeaderboardEvaluator(object):
 
         for i, _ in enumerate(self.ego_vehicles):
             if self.ego_vehicles[i]:
-                self.ego_vehicles[i].destroy()
+                self._safe_destroy_actor_handle(self.ego_vehicles[i])
                 self.ego_vehicles[i] = None
         self.ego_vehicles = []
 
@@ -632,8 +660,7 @@ class LeaderboardEvaluator(object):
             # print(self.world.get_actors())
             # print(self.world.get_actors().filter("*sensor*"))
             for zombie in self.world.get_actors().filter("*sensor*"):
-                zombie.stop()
-                zombie.destroy()
+                self._safe_destroy_actor_handle(zombie, stop_first=True)
                 zombie = None            
 
             if self._received_sigint:

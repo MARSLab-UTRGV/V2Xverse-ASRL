@@ -14,11 +14,63 @@ from __future__ import print_function
 
 import math
 import re
+import logging
 import numpy.random as random
 from six import iteritems
 import time
 
 import carla
+
+
+def _is_actor_live(actor):
+    """
+    Return whether an actor handle is still valid/alive.
+    """
+    if actor is None:
+        return False
+    try:
+        return bool(actor.is_alive)
+    except Exception:
+        return False
+
+
+def _safe_destroy_actor(actor):
+    """
+    Best-effort actor destroy that tolerates already-removed actors.
+    """
+    if actor is None:
+        return False
+    try:
+        if hasattr(actor, "is_alive") and not actor.is_alive:
+            return False
+    except Exception:
+        return False
+
+    try:
+        actor.destroy()
+        return True
+    except RuntimeError as err:
+        # Treat duplicate destroy attempts as a no-op during cleanup.
+        message = str(err).lower()
+        if "not found" in message or "already dead" in message:
+            return False
+        logging.debug("Actor destroy failed: %s", err)
+        return False
+    except Exception as err:
+        logging.debug("Actor destroy failed: %s", err)
+        return False
+
+
+def _live_world_actor_ids(world):
+    """
+    Snapshot live actor ids directly from CARLA world.
+    """
+    if world is None:
+        return set()
+    try:
+        return {actor.id for actor in world.get_actors()}
+    except Exception:
+        return set()
 
 
 def calculate_velocity(actor):
@@ -429,12 +481,10 @@ class CarlaActorPool(object):
         """
         Remove an actor from the pool using its ID
         """
-        if actor_id in CarlaActorPool._carla_actor_pool:
-            CarlaActorPool._carla_actor_pool[actor_id].destroy()
-            CarlaActorPool._carla_actor_pool[actor_id] = None
-            CarlaActorPool._carla_actor_pool.pop(actor_id)
-        else:
-            print("Trying to remove a non-existing actor id {}".format(actor_id))
+        actor = CarlaActorPool._carla_actor_pool.pop(actor_id, None)
+        if actor is None:
+            return
+        _safe_destroy_actor(actor)
 
     @staticmethod
     def cleanup():
@@ -444,9 +494,15 @@ class CarlaActorPool(object):
 
         DestroyActor = carla.command.DestroyActor       # pylint: disable=invalid-name
         batch = []
+        live_ids = _live_world_actor_ids(CarlaActorPool._world)
 
-        for actor_id in CarlaActorPool._carla_actor_pool.copy():
-            batch.append(DestroyActor(CarlaActorPool._carla_actor_pool[actor_id]))
+        for actor_id, actor in CarlaActorPool._carla_actor_pool.copy().items():
+            if actor is None:
+                continue
+            if live_ids and actor_id not in live_ids:
+                continue
+            if _is_actor_live(actor):
+                batch.append(DestroyActor(actor))
 
         if CarlaActorPool._client:
             try:
@@ -1426,12 +1482,21 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
         """
         Remove an actor from the pool using its ID
         """
-        if actor_id in CarlaDataProvider._carla_actor_pool:
-            CarlaDataProvider._carla_actor_pool[actor_id].destroy()
-            CarlaDataProvider._carla_actor_pool[actor_id] = None
-            CarlaDataProvider._carla_actor_pool.pop(actor_id)
-        else:
-            print("Trying to remove a non-existing actor id {}".format(actor_id))
+        actor = CarlaDataProvider._carla_actor_pool.pop(actor_id, None)
+        if actor is None:
+            return
+
+        # Prefer a fresh world lookup to avoid stale actor handles.
+        destroy_target = actor
+        if CarlaDataProvider._world is not None:
+            try:
+                world_actor = CarlaDataProvider._world.get_actor(actor_id)
+                if world_actor is not None:
+                    destroy_target = world_actor
+            except Exception:
+                pass
+
+        _safe_destroy_actor(destroy_target)
 
     @staticmethod
     def remove_actors_in_surrounding(location, distance):
@@ -1475,10 +1540,14 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
         """
         DestroyActor = carla.command.DestroyActor       # pylint: disable=invalid-name
         batch = []
+        live_ids = _live_world_actor_ids(CarlaDataProvider._world)
 
-        for actor_id in CarlaDataProvider._carla_actor_pool:
-            actor = CarlaDataProvider._carla_actor_pool[actor_id]
-            if actor.is_alive:
+        for actor_id, actor in CarlaDataProvider._carla_actor_pool.items():
+            if actor is None:
+                continue
+            if live_ids and actor_id not in live_ids:
+                continue
+            if _is_actor_live(actor):
                 batch.append(DestroyActor(actor))
 
         if CarlaDataProvider._client:
