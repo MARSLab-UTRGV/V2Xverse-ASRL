@@ -155,7 +155,9 @@ Policy network (`rl_policy.py`):
 
 - Actor MLP: `(obs_dim -> 64 -> 64 -> action_dim)` with `Tanh`.
 - Critic MLP: `(obs_dim -> 64 -> 64 -> 1)` with `Tanh`.
-- Gaussian policy with learned `logstd` parameter.
+- Gaussian policy with learned `logstd` parameter and `tanh` action squashing.
+- Stored/executed RL actions are bounded to `[-1, 1]` before gamma mapping.
+- Log-prob uses squash correction `log(1 - a^2 + eps)` (change-of-variables).
 
 Trainer (`rl_trainer.py`):
 

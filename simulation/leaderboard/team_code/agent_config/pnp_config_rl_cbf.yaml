@@ -78,7 +78,7 @@ rl:  # Reinforcement Learning (RL) configuration for adaptive gammas
     ent_coef: 0.005               # Entropy bonus coefficient
     vf_coef: 0.5                  # Value loss coefficient
     max_grad_norm: 0.5            # Gradient clipping norm
-    cost_limit: 0.1               # Target average episodic cost for constraint
+    cost_limit: 0.2               # Target average step cost for constraint (dense-cost calibrated)
     lagrange_mult: 1.0            # Initial Lagrange multiplier (lambda)
     lagrange_mult_max: 100.0      # Max Lagrange multiplier
     use_pid_lagrangian: true      # Use PID-style lambda update

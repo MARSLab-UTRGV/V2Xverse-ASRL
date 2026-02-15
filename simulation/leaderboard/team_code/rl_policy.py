@@ -26,11 +26,22 @@ class GammaPolicy(nn.Module):
         self.critic = nn.Sequential(*v_layers, nn.Linear(in_dim, 1))
 
         self.logstd = nn.Parameter(torch.zeros(1, action_dim))
+        self._squash_eps = 1e-6
 
     def _ensure_batch(self, x):
         if x.dim() == 1:
             return x.unsqueeze(0)
         return x
+
+    def _atanh(self, x):
+        x = torch.clamp(x, -1.0 + self._squash_eps, 1.0 - self._squash_eps)
+        return 0.5 * (torch.log1p(x) - torch.log1p(-x))
+
+    def _squashed_logprob(self, dist, pre_tanh, squashed):
+        # Change-of-variables correction for tanh-squashed Gaussian actions.
+        base_logprob = dist.log_prob(pre_tanh)
+        correction = torch.log(1.0 - squashed.pow(2) + self._squash_eps)
+        return (base_logprob - correction).sum(-1)
 
     def get_value(self, obs):
         obs = self._ensure_batch(obs)
@@ -45,11 +56,15 @@ class GammaPolicy(nn.Module):
 
         if action is None:
             if deterministic:
-                action = mean
+                pre_tanh = mean
             else:
-                action = dist.sample()
+                pre_tanh = dist.rsample()
+            action = torch.tanh(pre_tanh)
+        else:
+            action = torch.clamp(action, -1.0 + self._squash_eps, 1.0 - self._squash_eps)
+            pre_tanh = self._atanh(action)
 
-        logprob = dist.log_prob(action).sum(-1)
+        logprob = self._squashed_logprob(dist, pre_tanh, action)
         entropy = dist.entropy().sum(-1)
         value = self.critic(obs).squeeze(-1)
         return action, logprob, entropy, value
@@ -60,7 +75,9 @@ class GammaPolicy(nn.Module):
         logstd = self.logstd.expand_as(mean)
         std = torch.exp(logstd)
         dist = Normal(mean, std)
-        logprob = dist.log_prob(action).sum(-1)
+        action = torch.clamp(action, -1.0 + self._squash_eps, 1.0 - self._squash_eps)
+        pre_tanh = self._atanh(action)
+        logprob = self._squashed_logprob(dist, pre_tanh, action)
         entropy = dist.entropy().sum(-1)
         value = self.critic(obs).squeeze(-1)
         return logprob, entropy, value

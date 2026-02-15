@@ -323,26 +323,53 @@ class AgentWrapper(object):
         """
         Remove and destroy all sensors
         """
+        teardown_profile = CarlaDataProvider.is_teardown_profile_enabled()
+        cleanup_start = time.time() if teardown_profile else None
+        stopped = 0
+        destroyed = 0
         for i, _sensors_ego in enumerate(self._sensors_list):
             for i, _ in enumerate(_sensors_ego):
                 if _sensors_ego[i] is not None:
                     _sensors_ego[i].stop()
+                    stopped += 1
                     _sensors_ego[i].destroy()
+                    destroyed += 1
                     _sensors_ego[i] = None
             _sensors_ego = []
         if hasattr(self._agent, "sensor_interface") and self._agent.sensor_interface is not None:
             self._agent.sensor_interface.clear()
+        if teardown_profile and cleanup_start is not None:
+            cleanup_ms = (time.time() - cleanup_start) * 1000.0
+            print(
+                "[TEARDOWN] agent_wrapper.cleanup sensors_stopped={} sensors_destroyed={} elapsed_ms={:.1f}".format(
+                    stopped, destroyed, cleanup_ms
+                )
+            )
 
     def cleanup_single(self, vehicle_num = 0):
         """
         Remove and destroy all sensors
         """
+        teardown_profile = CarlaDataProvider.is_teardown_profile_enabled()
+        cleanup_start = time.time() if teardown_profile else None
+        stopped = 0
+        destroyed = 0
         for i, _ in enumerate(self._sensors_list[vehicle_num]):
             if self._sensors_list[vehicle_num][i] is not None:
                 self._sensors_list[vehicle_num][i].stop()
+                stopped += 1
                 self._sensors_list[vehicle_num][i].destroy()
+                destroyed += 1
                 self._sensors_list[vehicle_num][i] = None
         self._sensors_list[vehicle_num] = []
+        if teardown_profile and cleanup_start is not None:
+            cleanup_ms = (time.time() - cleanup_start) * 1000.0
+            print(
+                "[TEARDOWN] agent_wrapper.cleanup_single vehicle={} sensors_stopped={} "
+                "sensors_destroyed={} elapsed_ms={:.1f}".format(
+                    vehicle_num, stopped, destroyed, cleanup_ms
+                )
+            )
 
     def cleanup_rsu(self, vehicle_num):
         if hasattr(self._agent,"clean_rsu_single"):

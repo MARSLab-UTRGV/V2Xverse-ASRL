@@ -173,6 +173,7 @@ class LeaderboardEvaluator(object):
         self.reuse_agent = bool(getattr(args, "reuse_agent", False))
         self._best_metrics = None
         self._received_sigint = False
+        self._teardown_profile = CarlaDataProvider.is_teardown_profile_enabled()
 
     def _get_rl_trainer(self):
         if not getattr(self, "agent_instance", None):
@@ -309,6 +310,11 @@ class LeaderboardEvaluator(object):
         """
         Remove and destroy all actors
         """
+        cleanup_start = time.time() if self._teardown_profile else None
+        manager_cleanup_ms = 0.0
+        provider_cleanup_ms = 0.0
+        ego_destroy_ms = 0.0
+        agent_destroy_ms = 0.0
 
         # Simulation still running and in synchronous mode?
         if self.manager and self.manager.get_running_status() \
@@ -321,26 +327,51 @@ class LeaderboardEvaluator(object):
             self.traffic_manager.set_synchronous_mode(False)
 
         if self.manager:
+            manager_cleanup_start = time.time() if self._teardown_profile else None
             self.manager.cleanup()
+            if self._teardown_profile:
+                manager_cleanup_ms = (time.time() - manager_cleanup_start) * 1000.0
 
+        provider_cleanup_start = time.time() if self._teardown_profile else None
         CarlaDataProvider.cleanup()
+        if self._teardown_profile:
+            provider_cleanup_ms = (time.time() - provider_cleanup_start) * 1000.0
 
+        ego_destroy_start = time.time() if self._teardown_profile else None
         for i, _ in enumerate(self.ego_vehicles):
             if self.ego_vehicles[i]:
                 self._safe_destroy_actor_handle(self.ego_vehicles[i])
                 self.ego_vehicles[i] = None
         self.ego_vehicles = []
+        if self._teardown_profile:
+            ego_destroy_ms = (time.time() - ego_destroy_start) * 1000.0
 
         if self._agent_watchdog._timer:
             self._agent_watchdog.stop()
 
         if hasattr(self, 'agent_instance') and self.agent_instance and not self.reuse_agent:
+            agent_destroy_start = time.time() if self._teardown_profile else None
             self.agent_instance.destroy()
             self.agent_instance = None
+            if self._teardown_profile:
+                agent_destroy_ms = (time.time() - agent_destroy_start) * 1000.0
 
         if hasattr(self, 'statistics_manager') and self.statistics_manager:
             for j in range(self.ego_vehicles_num):
                 self.statistics_manager[j].scenario = None
+
+        if self._teardown_profile and cleanup_start is not None:
+            total_cleanup_ms = (time.time() - cleanup_start) * 1000.0
+            print(
+                "[EVAL_CLEANUP] manager_ms={:.1f} provider_ms={:.1f} ego_destroy_ms={:.1f} "
+                "agent_destroy_ms={:.1f} total_ms={:.1f}".format(
+                    manager_cleanup_ms,
+                    provider_cleanup_ms,
+                    ego_destroy_ms,
+                    agent_destroy_ms,
+                    total_cleanup_ms,
+                )
+            )
 
     def _prepare_ego_vehicles(self, ego_vehicles, wait_for_ego_vehicles=False):
         """
