@@ -75,6 +75,32 @@ def plot_collisions(summary_rows, out_dir):
     _save(fig, os.path.join(out_dir, "overall_collisions_per_km"))
 
 
+def plot_all_collisions(summary_rows, out_dir):
+    methods = [r["method"] for r in summary_rows]
+    collisions_vehicle = [_to_float(r["collisions_vehicle_per_route_mean"]) for r in summary_rows]
+    collisions_pedestrian = [_to_float(r["collisions_pedestrian_per_route_mean"]) for r in summary_rows]
+    collisions_layout = [_to_float(r["collisions_layout_per_route_mean"]) for r in summary_rows]
+    collisions_total = [_to_float(r["collisions_total_per_route_mean"]) for r in summary_rows]
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    x = list(range(len(methods)))
+
+    ax.bar(x, collisions_vehicle, label="vehicle")
+    ax.bar(x, collisions_pedestrian, bottom=collisions_vehicle, label="pedestrian")
+    stack_bottom = [collisions_vehicle[i] + collisions_pedestrian[i] for i in range(len(methods))]
+    ax.bar(x, collisions_layout, bottom=stack_bottom, label="static")
+
+    # Overlay total collisions per route as a marker for quick sanity-check.
+    ax.plot(x, collisions_total, color="black", marker="o", linestyle="--", linewidth=1, label="total")
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(methods, rotation=25, ha="right")
+    ax.set_ylabel("Collisions per route")
+    ax.set_title("All Collisions per Method")
+    ax.legend(loc="upper right", fontsize=8)
+    _save(fig, os.path.join(out_dir, "all_collisions_per_method"))
+
+
 def plot_infraction_breakdown(summary_rows, out_dir):
     methods = [r["method"] for r in summary_rows]
     metrics = [
@@ -172,6 +198,7 @@ def main():
 
     plot_overall(summary_rows, args.output_dir)
     plot_collisions(summary_rows, args.output_dir)
+    plot_all_collisions(summary_rows, args.output_dir)
     plot_infraction_breakdown(summary_rows, args.output_dir)
     plot_paired_deltas(paired_rows, args.output_dir)
     plot_stage_curve(summary_rows, args.output_dir)
