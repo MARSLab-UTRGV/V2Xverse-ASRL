@@ -33,6 +33,7 @@ class CBFQPFilter:
         self.gamma_bike = float(config.get("gamma_bike", 0.5))
         self.debug = bool(config.get("debug", False))
         self._eps = 1e-4
+        self.dt = float(config.get("dt", 0.2))
 
     def _actor_gamma(self, actor) -> float:
         type_id = actor.type_id.lower()
@@ -43,12 +44,22 @@ class CBFQPFilter:
         return self.gamma_vehicle
 
     @staticmethod
+    def _actor_class(actor) -> str:
+        type_id = actor.type_id.lower()
+        if "walker" in type_id:
+            return "ped"
+        if "diamondback" in type_id or "bicycle" in type_id:
+            return "bike"
+        return "vehicle"
+
+    @staticmethod
     def _vec2(carla_vector) -> np.ndarray:
         return np.array([carla_vector.x, carla_vector.y], dtype=np.float32)
 
     def _get_dt(self, ego) -> float:
         try:
-            dt = ego.get_world().get_settings().fixed_delta_seconds
+            #dt = ego.get_world().get_settings().fixed_delta_seconds
+            dt = self.dt
             if dt is None or dt <= 0:
                 return 0.05
             return float(dt)
@@ -100,6 +111,8 @@ class CBFQPFilter:
 
         cbf_constraints = []
         min_barrier_value = float("inf")
+        min_barrier_actor = None
+        tightest_actor = None
         for actor in actors:
             if actor is None or actor.id == ego.id:
                 continue
@@ -151,9 +164,42 @@ class CBFQPFilter:
 
             cbf_constraints.append((accel_coefficient, constraint_rhs))
 
+            if barrier_now <= min_barrier_value:
+                min_barrier_actor = {
+                    "id": int(actor.id),
+                    "type": self._actor_class(actor),
+                    "dist": relative_distance,
+                    "closing_speed": closing_speed,
+                    "heading_alignment": heading_alignment,
+                    "barrier": barrier_now,
+                    "gamma": barrier_gain,
+                    "rhs": constraint_rhs,
+                    "a_coeff": accel_coefficient,
+                }
+
+            # Constraint pressure at nominal accel: positive means nominal violates CBF.
+            nominal_residual = constraint_rhs - accel_coefficient * nominal_longitudinal_accel
+            if tightest_actor is None or nominal_residual > tightest_actor["nominal_residual"]:
+                tightest_actor = {
+                    "id": int(actor.id),
+                    "type": self._actor_class(actor),
+                    "nominal_residual": nominal_residual,
+                    "dist": relative_distance,
+                    "closing_speed": closing_speed,
+                    "heading_alignment": heading_alignment,
+                    "barrier": barrier_now,
+                    "gamma": barrier_gain,
+                    "rhs": constraint_rhs,
+                    "a_coeff": accel_coefficient,
+                }
+
         if not cbf_constraints:
             info.update(
-                {"status": "no_constraints", "min_barrier_value": min_barrier_value}
+                {
+                    "status": "no_constraints",
+                    "min_barrier_value": min_barrier_value,
+                    "num_constraints": 0,
+                }
             )
             return steer_nom, desired_speed, info
 
@@ -208,6 +254,39 @@ class CBFQPFilter:
         safe_longitudinal_accel = float(res.x[0])
         desired_speed_safe = max(0.0, ego_speed + safe_longitudinal_accel * dt)
         info.update(
-            {"status": res.info.status, "min_barrier_value": min_barrier_value}
+            {
+                "status": res.info.status,
+                "min_barrier_value": min_barrier_value,
+                "num_constraints": len(cbf_constraints),
+            }
         )
+
+        if min_barrier_actor is not None:
+            info.update(
+                {
+                    "min_barrier_actor_id": min_barrier_actor["id"],
+                    "min_barrier_actor_type": min_barrier_actor["type"],
+                    "min_barrier_actor_dist": float(min_barrier_actor["dist"]),
+                    "min_barrier_actor_closing_speed": float(min_barrier_actor["closing_speed"]),
+                    "min_barrier_actor_heading_alignment": float(min_barrier_actor["heading_alignment"]),
+                    "min_barrier_actor_gamma": float(min_barrier_actor["gamma"]),
+                    "min_barrier_actor_rhs": float(min_barrier_actor["rhs"]),
+                    "min_barrier_actor_a_coeff": float(min_barrier_actor["a_coeff"]),
+                }
+            )
+
+        if tightest_actor is not None:
+            info.update(
+                {
+                    "tightest_actor_id": tightest_actor["id"],
+                    "tightest_actor_type": tightest_actor["type"],
+                    "tightest_actor_nominal_residual": float(tightest_actor["nominal_residual"]),
+                    "tightest_actor_dist": float(tightest_actor["dist"]),
+                    "tightest_actor_closing_speed": float(tightest_actor["closing_speed"]),
+                    "tightest_actor_heading_alignment": float(tightest_actor["heading_alignment"]),
+                    "tightest_actor_gamma": float(tightest_actor["gamma"]),
+                    "tightest_actor_rhs": float(tightest_actor["rhs"]),
+                    "tightest_actor_a_coeff": float(tightest_actor["a_coeff"]),
+                }
+            )
         return steer_nom, desired_speed_safe, info

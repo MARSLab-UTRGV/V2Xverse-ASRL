@@ -54,7 +54,6 @@ cbf:  # Control Barrier Function (CBF) filter configuration
     a_min: -8.0              # Minimum longitudinal accel allowed by QP (m/s^2)
     a_max: 4.0               # Maximum longitudinal accel allowed by QP (m/s^2)
     slack_weight: 1000.0    # QP slack penalty weight (higher = stricter constraints)
-    steer_weight: 50.0       # Steering weight (unused in current longitudinal-only CBF)
     gamma_vehicle: 0.5       # Barrier gain for vehicles (if RL disabled)
     gamma_ped: 0.5           # Barrier gain for pedestrians (if RL disabled)
     gamma_bike: 0.5         # Barrier gain for bicycles (if RL disabled)
@@ -70,7 +69,7 @@ rl:  # Reinforcement Learning (RL) configuration for adaptive gammas
     eval_only: false              # true = freeze RL learning and only infer gammas from loaded checkpoint
     deterministic_eval: true      # when eval_only=true, use deterministic policy action
     learning_rate: 3.0e-4         # Adam learning rate
-    gamma: 0.99                   # Discount factor for rewards/costs
+    gamma: 0.98                   # Discount factor for rewards/costs
     gae_lambda: 0.95              # GAE lambda for reward advantage estimation
     clip_coef: 0.2                # PPO clip epsilon
     update_epochs: 10             # PPO epochs per update

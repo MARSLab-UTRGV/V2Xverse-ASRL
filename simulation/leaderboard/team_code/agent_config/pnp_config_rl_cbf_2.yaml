@@ -54,10 +54,10 @@ cbf:  # Control Barrier Function (CBF) filter configuration
     a_min: -8.0              # Minimum longitudinal accel allowed by QP (m/s^2)
     a_max: 4.0               # Maximum longitudinal accel allowed by QP (m/s^2)
     slack_weight: 1000.0    # QP slack penalty weight (higher = stricter constraints)
-    steer_weight: 50.0       # Steering weight (unused in current longitudinal-only CBF)
-    gamma_vehicle: 0.5       # Barrier gain for vehicles (if RL disabled)
-    gamma_ped: 0.5           # Barrier gain for pedestrians (if RL disabled)
-    gamma_bike: 0.5         # Barrier gain for bicycles (if RL disabled)
+    gamma_vehicle: 0.9       # Barrier gain for vehicles (if RL disabled)
+    gamma_ped: 0.9           # Barrier gain for pedestrians (if RL disabled)
+    gamma_bike: 0.9         # Barrier gain for bicycles (if RL disabled)
+    dt: 0.2                  # Time step (s) for CBF prediction horizon
 
 rl:  # Reinforcement Learning (RL) configuration for adaptive gammas
     enabled: true                 # Enable/disable RL policy for gamma actions

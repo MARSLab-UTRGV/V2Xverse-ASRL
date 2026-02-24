@@ -1174,6 +1174,7 @@ class PnP_infer():
 			desired_speed = None
 			if isinstance(meta_infos, dict):
 				desired_speed = meta_infos.get('desired_speed', None)
+				route_info['old_desired_speed'] = desired_speed
 			if desired_speed is not None and getattr(self.cbf_filter, 'enabled', False):
 				ego_actor = CarlaDataProvider.get_hero_actor(hero_id=count_i)
 				world  = ego_actor.get_world()
