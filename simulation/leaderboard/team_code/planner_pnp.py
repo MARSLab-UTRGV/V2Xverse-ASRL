@@ -41,6 +41,7 @@ class RoutePlanner(object):
         self.route = []
         self.min_distance = min_distance
         self.max_distance = max_distance
+        self._initial_len = []
 
         # self.mean = np.array([49.0, 8.0]) # for carla 9.9
         # self.scale = np.array([111324.60662786, 73032.1570362]) # for carla 9.9
@@ -51,6 +52,7 @@ class RoutePlanner(object):
 
     def set_route(self, global_plan, gps=False):
         self.route.clear()
+        self._initial_len = []
         route_num = len(global_plan)
         for route_id in range(route_num):
             route_tmp = deque()
@@ -64,6 +66,17 @@ class RoutePlanner(object):
                     pos -= self.mean
                 route_tmp.append((pos, cmd))
             self.route.append(route_tmp)
+            self._initial_len.append(len(route_tmp))
+
+    def get_progress(self, vehicle_num):
+        if vehicle_num >= len(self.route) or vehicle_num >= len(self._initial_len):
+            return 0.0
+        total = float(self._initial_len[vehicle_num])
+        if total <= 0.0:
+            return 0.0
+        remaining = float(len(self.route[vehicle_num]))
+        progress = 1.0 - (remaining / total)
+        return float(np.clip(progress, 0.0, 1.0))
 
     def run_step(self, gps, vehicle_num):
         self.debug.clear()

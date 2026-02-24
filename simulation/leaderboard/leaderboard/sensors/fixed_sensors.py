@@ -702,6 +702,8 @@ class SensorUnit(object):
                 _sensor = None
         self._sensors_list = []
         self.deleted=True
+        if hasattr(self, "sensor_interface") and self.sensor_interface is not None:
+            self.sensor_interface.clear()
 
 # instantiated sensor units
 

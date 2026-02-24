@@ -231,6 +231,8 @@ class SensorInterface(object):
         self._data_buffers = {}
         self._new_data_buffers = Queue()
         self._queue_timeout = 100 # default: 10
+        self._missing_tag_warned = set()
+        self._dropped_updates = 0
 
         # Only sensor that doesn't get the data on tick, needs special treatment
         self._opendrive_tag = None
@@ -248,9 +250,14 @@ class SensorInterface(object):
     def update_sensor(self, tag, data, timestamp):
         # print("Updating {} - {}".format(tag, timestamp))
         if tag not in self._sensors_objects:
-            raise SensorConfigurationInvalid("The sensor with tag [{}] has not been created!".format(tag))
+            if tag not in self._missing_tag_warned:
+                logging.warning("Dropped late sensor update for removed tag [%s]", tag)
+                self._missing_tag_warned.add(tag)
+            self._dropped_updates += 1
+            return False
 
         self._new_data_buffers.put((tag, timestamp, data))
+        return True
 
     def get_data(self):
         try: 
@@ -270,3 +277,14 @@ class SensorInterface(object):
             raise SensorReceivedNoData("A sensor took too long to send their data")
 
         return data_dict
+
+    def clear(self):
+        """
+        Clear all registered sensors and pending data.
+        """
+        self._sensors_objects = {}
+        self._data_buffers = {}
+        self._new_data_buffers = Queue()
+        self._missing_tag_warned = set()
+        self._dropped_updates = 0
+        self._opendrive_tag = None

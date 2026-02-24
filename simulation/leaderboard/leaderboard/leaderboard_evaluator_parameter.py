@@ -357,6 +357,13 @@ class LeaderboardEvaluator(object):
             self.agent_instance = getattr(self.module_agent, agent_class_name)(args.agent_config, 
                                                                                self.ego_vehicles_num)
             config.agent = self.agent_instance
+
+            # Route-specific reset/path setup for agents that keep per-route state.
+            if hasattr(self.agent_instance, "on_route_start"):
+                try:
+                    self.agent_instance.on_route_start(args.routes)
+                except Exception:
+                    pass
             if hasattr(self.agent_instance, "get_save_path"):
                 print("Data Generation Confirmed!")
                 config.save_path_root = self.agent_instance.get_save_path()
@@ -385,9 +392,6 @@ class LeaderboardEvaluator(object):
             with open(args_file_dir, 'w') as json_file:
                 json_file.write(json_str)
             print("{} (repetition {}) Log file initialized!".format(config.name, config.repetition_index))
-
-            # save source code
-            backup_script(os.environ["RESULT_ROOT"])
 
             # Check and store the sensors
             if not self.sensors:

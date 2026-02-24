@@ -14,11 +14,102 @@ from __future__ import print_function
 
 import math
 import re
+import logging
+import os
 import numpy.random as random
 from six import iteritems
 import time
 
 import carla
+
+
+_TEARDOWN_PROFILE_ENABLED = os.environ.get("TEARDOWN_PROFILE", "0") == "1"
+
+
+def _new_teardown_stats():
+    """
+    Create a fresh teardown statistics dictionary.
+    """
+    return {
+        "remove_actor_calls": 0,
+        "remove_actor_missing_pool": 0,
+        "remove_actor_destroy_ok": 0,
+        "remove_actor_destroy_not_found": 0,
+        "remove_actor_destroy_skipped_dead": 0,
+        "remove_actor_destroy_other_fail": 0,
+        "cleanup_calls": 0,
+        "cleanup_batch_size": 0,
+        "cleanup_batch_destroy_ok": 0,
+        "cleanup_batch_not_found": 0,
+        "cleanup_batch_other_errors": 0,
+        "cleanup_ms_total": 0.0,
+    }
+
+
+def _add_teardown_stat(stats, key, delta=1):
+    """
+    Increment a teardown stat key when profiling is enabled.
+    """
+    if not _TEARDOWN_PROFILE_ENABLED or stats is None:
+        return
+    stats[key] = stats.get(key, 0) + delta
+
+
+def _is_actor_live(actor):
+    """
+    Return whether an actor handle is still valid/alive.
+    """
+    if actor is None:
+        return False
+    try:
+        return bool(actor.is_alive)
+    except Exception:
+        return False
+
+
+def _safe_destroy_actor_status(actor):
+    """
+    Best-effort destroy with an explicit status label.
+    """
+    if actor is None:
+        return "none"
+    try:
+        if hasattr(actor, "is_alive") and not actor.is_alive:
+            return "dead"
+    except Exception:
+        return "dead"
+
+    try:
+        actor.destroy()
+        return "ok"
+    except RuntimeError as err:
+        message = str(err).lower()
+        if "not found" in message or "already dead" in message:
+            return "not_found"
+        logging.debug("Actor destroy failed: %s", err)
+        return "error"
+    except Exception as err:
+        logging.debug("Actor destroy failed: %s", err)
+        return "error"
+
+
+def _safe_destroy_actor(actor):
+    """
+    Best-effort actor destroy that tolerates already-removed actors.
+    """
+    return _safe_destroy_actor_status(actor) == "ok"
+
+
+def _live_world_actor_ids(world):
+    """
+    Snapshot live actor ids directly from CARLA world.
+    """
+    if world is None:
+        return set()
+    try:
+        return {actor.id for actor in world.get_actors()}
+    except Exception:
+        return set()
 
 
 def calculate_velocity(actor):
@@ -429,12 +520,10 @@ class CarlaActorPool(object):
         """
         Remove an actor from the pool using its ID
         """
-        if actor_id in CarlaActorPool._carla_actor_pool:
-            CarlaActorPool._carla_actor_pool[actor_id].destroy()
-            CarlaActorPool._carla_actor_pool[actor_id] = None
-            CarlaActorPool._carla_actor_pool.pop(actor_id)
-        else:
-            print("Trying to remove a non-existing actor id {}".format(actor_id))
+        actor = CarlaActorPool._carla_actor_pool.pop(actor_id, None)
+        if actor is None:
+            return
+        _safe_destroy_actor(actor)
 
     @staticmethod
     def cleanup():
@@ -444,9 +533,15 @@ class CarlaActorPool(object):
 
         DestroyActor = carla.command.DestroyActor       # pylint: disable=invalid-name
         batch = []
+        live_ids = _live_world_actor_ids(CarlaActorPool._world)
 
-        for actor_id in CarlaActorPool._carla_actor_pool.copy():
-            batch.append(DestroyActor(CarlaActorPool._carla_actor_pool[actor_id]))
+        for actor_id, actor in CarlaActorPool._carla_actor_pool.copy().items():
+            if actor is None:
+                continue
+            if live_ids and actor_id not in live_ids:
+                continue
+            if _is_actor_live(actor):
+                batch.append(DestroyActor(actor))
 
         if CarlaActorPool._client:
             try:
@@ -510,6 +605,7 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
     _traffic_manager_port = 2500
     _rng = random.RandomState(2000)
     hazard_num=0
+    _teardown_stats = _new_teardown_stats()
 
     @staticmethod
     def register_actor(actor):
@@ -1426,12 +1522,33 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
         """
         Remove an actor from the pool using its ID
         """
-        if actor_id in CarlaDataProvider._carla_actor_pool:
-            CarlaDataProvider._carla_actor_pool[actor_id].destroy()
-            CarlaDataProvider._carla_actor_pool[actor_id] = None
-            CarlaDataProvider._carla_actor_pool.pop(actor_id)
+        stats = CarlaDataProvider._teardown_stats
+        _add_teardown_stat(stats, "remove_actor_calls", 1)
+
+        actor = CarlaDataProvider._carla_actor_pool.pop(actor_id, None)
+        if actor is None:
+            _add_teardown_stat(stats, "remove_actor_missing_pool", 1)
+            return
+
+        # Prefer a fresh world lookup to avoid stale actor handles.
+        destroy_target = actor
+        if CarlaDataProvider._world is not None:
+            try:
+                world_actor = CarlaDataProvider._world.get_actor(actor_id)
+                if world_actor is not None:
+                    destroy_target = world_actor
+            except Exception:
+                pass
+
+        destroy_status = _safe_destroy_actor_status(destroy_target)
+        if destroy_status == "ok":
+            _add_teardown_stat(stats, "remove_actor_destroy_ok", 1)
+        elif destroy_status == "not_found":
+            _add_teardown_stat(stats, "remove_actor_destroy_not_found", 1)
+        elif destroy_status in ("dead", "none"):
+            _add_teardown_stat(stats, "remove_actor_destroy_skipped_dead", 1)
         else:
-            print("Trying to remove a non-existing actor id {}".format(actor_id))
+            _add_teardown_stat(stats, "remove_actor_destroy_other_fail", 1)
 
     @staticmethod
     def remove_actors_in_surrounding(location, distance):
@@ -1439,10 +1556,22 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
         Remove all actors from the pool that are closer than distance to the
         provided location
         """
-        for actor_id in CarlaDataProvider._carla_actor_pool.copy():
-            if CarlaDataProvider._carla_actor_pool[actor_id].get_location().distance(location) < distance:
-                CarlaDataProvider._carla_actor_pool[actor_id].destroy()
-                CarlaDataProvider._carla_actor_pool.pop(actor_id)
+        stats = CarlaDataProvider._teardown_stats
+        for actor_id, actor in CarlaDataProvider._carla_actor_pool.copy().items():
+            if actor is None:
+                continue
+            if actor.get_location().distance(location) < distance:
+                _add_teardown_stat(stats, "remove_actor_calls", 1)
+                status = _safe_destroy_actor_status(actor)
+                if status == "ok":
+                    _add_teardown_stat(stats, "remove_actor_destroy_ok", 1)
+                elif status == "not_found":
+                    _add_teardown_stat(stats, "remove_actor_destroy_not_found", 1)
+                elif status in ("dead", "none"):
+                    _add_teardown_stat(stats, "remove_actor_destroy_skipped_dead", 1)
+                else:
+                    _add_teardown_stat(stats, "remove_actor_destroy_other_fail", 1)
+                CarlaDataProvider._carla_actor_pool.pop(actor_id, None)
 
         # Remove all keys with None values
         CarlaDataProvider._carla_actor_pool = dict({k: v for k, v in CarlaDataProvider._carla_actor_pool.items() if v})
@@ -1469,26 +1598,71 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
         CarlaDataProvider._rng = random.RandomState(seed)
 
     @staticmethod
+    def is_teardown_profile_enabled():
+        """
+        Return whether teardown instrumentation is enabled via environment variable.
+        """
+        return _TEARDOWN_PROFILE_ENABLED
+
+    @staticmethod
+    def reset_teardown_stats():
+        """
+        Reset teardown statistics counters.
+        """
+        CarlaDataProvider._teardown_stats = _new_teardown_stats()
+
+    @staticmethod
+    def get_teardown_stats():
+        """
+        Return a copy of teardown statistics.
+        """
+        return dict(CarlaDataProvider._teardown_stats)
+
+    @staticmethod
     def cleanup():
         """
         Cleanup and remove all entries from all dictionaries
         """
+        stats = CarlaDataProvider._teardown_stats
+        _add_teardown_stat(stats, "cleanup_calls", 1)
+        cleanup_start = time.time() if _TEARDOWN_PROFILE_ENABLED else None
+
         DestroyActor = carla.command.DestroyActor       # pylint: disable=invalid-name
         batch = []
+        live_ids = _live_world_actor_ids(CarlaDataProvider._world)
 
-        for actor_id in CarlaDataProvider._carla_actor_pool:
-            actor = CarlaDataProvider._carla_actor_pool[actor_id]
-            if actor.is_alive:
+        for actor_id, actor in CarlaDataProvider._carla_actor_pool.items():
+            if actor is None:
+                continue
+            if live_ids and actor_id not in live_ids:
+                continue
+            if _is_actor_live(actor):
                 batch.append(DestroyActor(actor))
+
+        _add_teardown_stat(stats, "cleanup_batch_size", len(batch))
 
         if CarlaDataProvider._client:
             try:
-                CarlaDataProvider._client.apply_batch_sync(batch)
+                responses = CarlaDataProvider._client.apply_batch_sync(batch)
+                if _TEARDOWN_PROFILE_ENABLED and responses is not None:
+                    for response in responses:
+                        if getattr(response, "error", None):
+                            message = str(response.error).lower()
+                            if "not found" in message or "already dead" in message:
+                                _add_teardown_stat(stats, "cleanup_batch_not_found", 1)
+                            else:
+                                _add_teardown_stat(stats, "cleanup_batch_other_errors", 1)
+                        else:
+                            _add_teardown_stat(stats, "cleanup_batch_destroy_ok", 1)
             except RuntimeError as e:
                 if "time-out" in str(e):
                     pass
                 else:
+                    _add_teardown_stat(stats, "cleanup_batch_other_errors", 1)
                     raise e
+
+        if _TEARDOWN_PROFILE_ENABLED and cleanup_start is not None:
+            _add_teardown_stat(stats, "cleanup_ms_total", (time.time() - cleanup_start) * 1000.0)
 
         CarlaDataProvider._actor_velocity_map.clear()
         CarlaDataProvider._actor_location_map.clear()

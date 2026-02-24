@@ -4,7 +4,9 @@ try:
 except ImportError:
     import json
 import requests
+import os
 import os.path
+import tempfile
 
 
 def autodetect_proxy():
@@ -73,5 +75,22 @@ def save_dict(endpoint, data):
         else:
             _ = requests.patch(url=endpoint, headers={'content-type':'application/json'}, data=json.dumps(data, indent=4, sort_keys=True))
     else:
-        with open(endpoint, 'w') as fd:
-            json.dump(data, fd, indent=4, sort_keys=True)
+        # Write atomically to avoid corrupting checkpoints on abrupt termination.
+        directory = os.path.dirname(os.path.abspath(endpoint))
+        if directory and not os.path.exists(directory):
+            os.makedirs(directory, exist_ok=True)
+
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            prefix=".checkpoint_tmp_",
+            suffix=".json",
+            dir=directory if directory else None,
+        )
+        try:
+            with os.fdopen(tmp_fd, 'w') as fd:
+                json.dump(data, fd, indent=4, sort_keys=True)
+                fd.flush()
+                os.fsync(fd.fileno())
+            os.replace(tmp_path, endpoint)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)

@@ -88,6 +88,7 @@ class ScenarioManager(object):
         self.c_time_record = []
         self.a_time_record = []
         self.sc_time_record = []
+        self._teardown_profile = CarlaDataProvider.is_teardown_profile_enabled()
         
     def signal_handler(self, signum, frame):
         """
@@ -127,6 +128,8 @@ class ScenarioManager(object):
         self.repetition_number = rep_number
         self.scenario=[] # important!!!!
         self.scenario_tree=[] # important!!!!
+        if self._teardown_profile:
+            CarlaDataProvider.reset_teardown_stats()
 
         self.ego_vehicles_num = ego_vehicles_num
         if self.ego_vehicles_num != 1 :
@@ -302,22 +305,60 @@ class ScenarioManager(object):
         self.scenario_duration_system = self.end_system_time - self.start_system_time
         self.scenario_duration_game = self.end_game_time - self.start_game_time
 
+        terminate_ms = 0.0
+        agent_cleanup_ms = 0.0
+        sensor_tf_cleanup_ms = 0.0
         if self.get_running_status():
             # print("terminate ego vehicle in the first step {}".format(ego_vehicle_id))
+            terminate_start = time.time()
             for ego_vehicle_id in range(len(self.ego_vehicles)):
                 if self.scenario[ego_vehicle_id] is not None:
                     # print("terminate ego vehicle {}".format(ego_vehicle_id))
                     self.scenario[ego_vehicle_id].terminate()
+            terminate_ms = (time.time() - terminate_start) * 1000.0
 
             if self._agent is not None:
+                agent_cleanup_start = time.time()
                 self._agent.cleanup()
                 self._agent = None
+                agent_cleanup_ms = (time.time() - agent_cleanup_start) * 1000.0
 
             if self.sensor_tf_list is not None:
+                sensor_tf_cleanup_start = time.time()
                 [_sensor.cleanup() for _sensor in self.sensor_tf_list]
                 self.sensor_tf_list = None
+                sensor_tf_cleanup_ms = (time.time() - sensor_tf_cleanup_start) * 1000.0
 
             self.analyze_scenario()
+
+            if self._teardown_profile:
+                stats = CarlaDataProvider.get_teardown_stats()
+                route_name = getattr(self.scenario_class, "name", self.scenario_class.__class__.__name__)
+                print(
+                    "[TEARDOWN] route={} terminate_ms={:.1f} agent_cleanup_ms={:.1f} "
+                    "sensor_tf_cleanup_ms={:.1f} remove_calls={} remove_missing_pool={} "
+                    "remove_ok={} remove_not_found={} remove_skipped_dead={} "
+                    "remove_other_fail={} cleanup_calls={} cleanup_batch_size={} "
+                    "cleanup_batch_ok={} cleanup_batch_not_found={} "
+                    "cleanup_batch_other_errors={} cleanup_ms_total={:.1f}".format(
+                        route_name,
+                        terminate_ms,
+                        agent_cleanup_ms,
+                        sensor_tf_cleanup_ms,
+                        int(stats.get("remove_actor_calls", 0)),
+                        int(stats.get("remove_actor_missing_pool", 0)),
+                        int(stats.get("remove_actor_destroy_ok", 0)),
+                        int(stats.get("remove_actor_destroy_not_found", 0)),
+                        int(stats.get("remove_actor_destroy_skipped_dead", 0)),
+                        int(stats.get("remove_actor_destroy_other_fail", 0)),
+                        int(stats.get("cleanup_calls", 0)),
+                        int(stats.get("cleanup_batch_size", 0)),
+                        int(stats.get("cleanup_batch_destroy_ok", 0)),
+                        int(stats.get("cleanup_batch_not_found", 0)),
+                        int(stats.get("cleanup_batch_other_errors", 0)),
+                        float(stats.get("cleanup_ms_total", 0.0)),
+                    )
+                )
 
     def analyze_scenario(self):
         """
