@@ -34,6 +34,15 @@ class CBFQPFilter:
         self.debug = bool(config.get("debug", False))
         self._eps = 1e-4
         self.dt = float(config.get("dt", 0.2))
+        # Path-aware actor gating to avoid overreacting to adjacent/opposite lanes.
+        self.actor_path_gating = bool(config.get("actor_path_gating", True))
+        self.gate_rear_distance = float(config.get("gate_rear_distance", 2.0))
+        self.gate_lateral_distance = float(config.get("gate_lateral_distance", 2.6))
+        self.gate_lateral_speed_gain = float(config.get("gate_lateral_speed_gain", 0.0))
+        self.gate_enable_crossing = bool(config.get("gate_enable_crossing", True))
+        self.gate_crossing_ttc = float(config.get("gate_crossing_ttc", 2.5))
+        self.gate_crossing_forward = float(config.get("gate_crossing_forward", 12.0))
+        self.gate_crossing_rear = float(config.get("gate_crossing_rear", 2.0))
 
     def _actor_gamma(self, actor) -> float:
         type_id = actor.type_id.lower()
@@ -103,6 +112,9 @@ class CBFQPFilter:
         ego_heading_vector = np.array(
             [math.cos(ego_yaw_rad), math.sin(ego_yaw_rad)], dtype=np.float32
         )
+        ego_right_vector = np.array(
+            [math.sin(ego_yaw_rad), -math.cos(ego_yaw_rad)], dtype=np.float32
+        )
 
         ego_bounding_box = ego.bounding_box.extent
         ego_collision_radius = float(
@@ -113,6 +125,10 @@ class CBFQPFilter:
         min_barrier_value = float("inf")
         min_barrier_actor = None
         tightest_actor = None
+        considered_actors = 0
+        filtered_behind = 0
+        filtered_lateral = 0
+        crossing_kept = 0
         for actor in actors:
             if actor is None or actor.id == ego.id:
                 continue
@@ -132,6 +148,49 @@ class CBFQPFilter:
             relative_velocity = (
                 self._vec2(actor.get_velocity()) - self._vec2(ego_velocity)
             )
+            considered_actors += 1
+
+            if self.actor_path_gating:
+                longitudinal_offset = float(
+                    np.dot(relative_position, ego_heading_vector)
+                )
+                lateral_offset = float(np.dot(relative_position, ego_right_vector))
+                forward_velocity = float(np.dot(relative_velocity, ego_heading_vector))
+                lateral_velocity = float(np.dot(relative_velocity, ego_right_vector))
+                lateral_gate = self.gate_lateral_distance + (
+                    self.gate_lateral_speed_gain * ego_speed
+                )
+
+                # Ignore actors sufficiently behind the ego.
+                if longitudinal_offset < -self.gate_rear_distance:
+                    filtered_behind += 1
+                    continue
+
+                # Keep near-path actors. For far-lateral actors, only keep if they are
+                # crossing toward ego path soon and near the ego longitudinal window.
+                if abs(lateral_offset) > lateral_gate:
+                    keep_crossing = False
+                    if self.gate_enable_crossing:
+                        moving_toward_path = (lateral_offset * lateral_velocity) < 0.0
+                        if moving_toward_path and abs(lateral_velocity) > self._eps:
+                            ttc_lat = abs(lateral_offset) / (
+                                abs(lateral_velocity) + self._eps
+                            )
+                            if ttc_lat <= self.gate_crossing_ttc:
+                                longitudinal_at_cross = (
+                                    longitudinal_offset + forward_velocity * ttc_lat
+                                )
+                                if (
+                                    -self.gate_crossing_rear
+                                    <= longitudinal_at_cross
+                                    <= self.gate_crossing_forward
+                                ):
+                                    keep_crossing = True
+                    if not keep_crossing:
+                        filtered_lateral += 1
+                        continue
+                    crossing_kept += 1
+
             relative_speed_along_line = float(
                 np.dot(relative_direction, relative_velocity)
             )
@@ -199,6 +258,10 @@ class CBFQPFilter:
                     "status": "no_constraints",
                     "min_barrier_value": min_barrier_value,
                     "num_constraints": 0,
+                    "num_considered_actors": considered_actors,
+                    "num_filtered_behind": filtered_behind,
+                    "num_filtered_lateral": filtered_lateral,
+                    "num_crossing_kept": crossing_kept,
                 }
             )
             return steer_nom, desired_speed, info
@@ -258,6 +321,10 @@ class CBFQPFilter:
                 "status": res.info.status,
                 "min_barrier_value": min_barrier_value,
                 "num_constraints": len(cbf_constraints),
+                "num_considered_actors": considered_actors,
+                "num_filtered_behind": filtered_behind,
+                "num_filtered_lateral": filtered_lateral,
+                "num_crossing_kept": crossing_kept,
             }
         )
 

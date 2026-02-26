@@ -29,6 +29,7 @@ import pdb
 from agents.navigation.local_planner import RoadOption
 
 from team_code.v2x_controller import V2X_Controller
+from team_code.v2x_pp_controller import V2X_PP_Controller
 from team_code.eval_utils import turn_traffic_into_bbox_fast
 from team_code.render_v2x import render, render_self_car, render_waypoints
 from team_code.v2x_utils import (generate_relative_heatmap, 
@@ -570,7 +571,19 @@ class PnP_infer():
 
 		self.perception_memory_bank = [{}]
 
-		self.controller = [V2X_Controller(self.config['control']) for _ in range(self.ego_vehicles_num)]
+		control_cfg = self.config['control']
+		lateral_controller = str(control_cfg.get("lateral_controller", "pid")).lower()
+		if lateral_controller == "pure_pursuit":
+			controller_cls = V2X_PP_Controller
+		elif lateral_controller == "pid":
+			controller_cls = V2X_Controller
+		else:
+			logging.warning(
+				"Unknown control.lateral_controller=%s, falling back to pid",
+				lateral_controller,
+			)
+			controller_cls = V2X_Controller
+		self.controller = [controller_cls(control_cfg) for _ in range(self.ego_vehicles_num)]
 		self._prev_route_progress = [0.0 for _ in range(self.ego_vehicles_num)]
 
 		cbf_config = self.config.get('cbf', {})
