@@ -20,6 +20,11 @@ INFRACTION_KEYS = [
     "vehicle_blocked",
 ]
 
+# Bike blueprints that are classified as "bike" by the CBF filter.
+# "vehicle.diamondback.century" is the only blueprint matched by the
+# CBF/RL code (checks for 'diamondback' in type_id).
+BIKE_SUBSTRINGS = ["diamondback"]
+
 
 def _safe_float(value, default=0.0):
     try:
@@ -165,6 +170,14 @@ def _load_route_rows(run):
         infractions = rec.get("infractions", {}) or {}
         inf_counts = {key: len(infractions.get(key, []) or []) for key in INFRACTION_KEYS}
 
+        # Split vehicle collisions into bike (diamondback) and non-bike vehicles
+        bike_count = 0
+        for s in (infractions.get("collisions_vehicle", []) or []):
+            s_lower = s.lower()
+            if any(tag in s_lower for tag in BIKE_SUBSTRINGS):
+                bike_count += 1
+        vehicle_only_count = inf_counts["collisions_vehicle"] - bike_count
+
         collisions_total = (
             inf_counts["collisions_layout"]
             + inf_counts["collisions_pedestrian"]
@@ -200,6 +213,8 @@ def _load_route_rows(run):
             "collisions_layout": inf_counts["collisions_layout"],
             "collisions_pedestrian": inf_counts["collisions_pedestrian"],
             "collisions_vehicle": inf_counts["collisions_vehicle"],
+            "collisions_bike": bike_count,
+            "collisions_vehicle_only": vehicle_only_count,
             "collisions_total": collisions_total,
             "outside_route_lanes": inf_counts["outside_route_lanes"],
             "red_light": inf_counts["red_light"],
@@ -271,6 +286,8 @@ def main():
 
         collisions_total = [r["collisions_total"] for r in rows]
         collisions_vehicle = [r["collisions_vehicle"] for r in rows]
+        collisions_bike = [r["collisions_bike"] for r in rows]
+        collisions_vehicle_only = [r["collisions_vehicle_only"] for r in rows]
         collisions_pedestrian = [r["collisions_pedestrian"] for r in rows]
         collisions_layout = [r["collisions_layout"] for r in rows]
         red_light = [r["red_light"] for r in rows]
@@ -298,6 +315,8 @@ def main():
                 "collisions_total_per_route_mean": _mean(collisions_total),
                 "collisions_per_km": collisions_per_km,
                 "collisions_vehicle_per_route_mean": _mean(collisions_vehicle),
+                "collisions_bike_per_route_mean": _mean(collisions_bike),
+                "collisions_vehicle_only_per_route_mean": _mean(collisions_vehicle_only),
                 "collisions_pedestrian_per_route_mean": _mean(collisions_pedestrian),
                 "collisions_layout_per_route_mean": _mean(collisions_layout),
                 "red_light_per_route_mean": _mean(red_light),
