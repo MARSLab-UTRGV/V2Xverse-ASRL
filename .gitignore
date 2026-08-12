@@ -264,5 +264,4 @@ opencood/models/heter_SECOND_lift_splat_2stage_redet.py
 opencood/loss/heterception_redet_loss.py
 opencood/hypes_yaml/opv2v/heter
 ./vscode
-results/
 checkpoints/
